@@ -543,7 +543,7 @@ fn switched(s: &Session, id: lightcraft_catalog::PhotoId, mid: u32, on: bool) ->
 #[cfg(feature = "sam")]
 #[test]
 fn a_detail_outcome_ignores_the_matte_and_clears_it() {
-    use crate::segment::{MATTE_CANCELLED, Tag};
+    use crate::segment::Tag;
     use lightcraft_develop::{MaskShape, SegMask};
     let mut s = Session::with_demo();
     let (id, mid) = stored_mask(&mut s);
