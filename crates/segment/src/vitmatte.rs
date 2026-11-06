@@ -102,7 +102,7 @@ impl Decoder {
         for (i, f) in self.fusion.iter().enumerate() {
             let (_, _, h, w) = x.dims4()?;
             let up = x.upsample_bilinear2d(2 * h, 2 * w, false)?;
-            let d = detail.get(detail.len() - 2 - i).ok_or_else(|| Error::Matte("detail stream is too short".into()))?;
+            let d = detail.get(detail.len() - 1 - i).ok_or_else(|| Error::Matte("detail stream is too short".into()))?;
             x = f.forward(&Tensor::cat(&[d, &up], 1)?)?;
             if let Some(s) = stages.as_deref_mut() {
                 s.push((format!("fusion_{i}"), x.clone()));
