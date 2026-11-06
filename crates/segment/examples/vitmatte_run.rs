@@ -47,7 +47,13 @@ fn synthetic(side: usize) -> (Vec<u8>, Vec<u8>) {
             let r = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt() / (side as f32 / 4.0);
             let fg = r < 1.0;
             rgb.extend(if fg { [200u8, 150, 120] } else { [40, (x * 255 / side) as u8, 90] });
-            tri.push(if (0.8..1.2).contains(&r) { 128 } else if fg { 255 } else { 0 });
+            tri.push(if (0.8..1.2).contains(&r) {
+                128
+            } else if fg {
+                255
+            } else {
+                0
+            });
         }
     }
     (rgb, tri)

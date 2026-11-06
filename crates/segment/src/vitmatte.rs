@@ -82,14 +82,22 @@ impl Decoder {
         let chans = [IN_CHANNELS, CONVSTREAM[0], CONVSTREAM[1], CONVSTREAM[2]];
         for i in 0..CONVSTREAM.len() {
             let v = vb.pp(format!("convstream.convs.{i}"));
-            convstream.push(ConvBn::new(ConvSpec { inp: chans[i], out: chans[i + 1], k: 3, stride: 2, bias: false }, v.pp("conv"), v.pp("batch_norm"))?);
+            convstream.push(ConvBn::new(
+                ConvSpec { inp: chans[i], out: chans[i + 1], k: 3, stride: 2, bias: false },
+                v.pp("conv"),
+                v.pp("batch_norm"),
+            )?);
         }
         let mut fusion = Vec::new();
         let ins = [HIDDEN, FUSION[0], FUSION[1], FUSION[2]];
         for i in 0..FUSION.len() {
             let detail = chans[chans.len() - 1 - i];
             let v = vb.pp(format!("fusion_blocks.{i}.conv"));
-            fusion.push(ConvBn::new(ConvSpec { inp: ins[i] + detail, out: FUSION[i], k: 3, stride: 1, bias: false }, v.pp("conv"), v.pp("batch_norm"))?);
+            fusion.push(ConvBn::new(
+                ConvSpec { inp: ins[i] + detail, out: FUSION[i], k: 3, stride: 1, bias: false },
+                v.pp("conv"),
+                v.pp("batch_norm"),
+            )?);
         }
         let h = vb.pp("matting_head.matting_convs");
         let head_conv = ConvBn::new(ConvSpec { inp: FUSION[3], out: 16, k: 3, stride: 1, bias: true }, h.pp("0"), h.pp("1"))?;

@@ -131,11 +131,8 @@ impl Attention {
         let rel_len = 2 * grid - 1;
         let rel_h = vb.get((rel_len, HEAD_DIM), "rel_pos_h")?.flatten_all()?.to_vec1::<f32>()?;
         let rel_w = vb.get((rel_len, HEAD_DIM), "rel_pos_w")?.flatten_all()?.to_vec1::<f32>()?;
-        let window_tables = if window {
-            Some((rel_table(&rel_h, rel_len, WINDOW, vb.device())?, rel_table(&rel_w, rel_len, WINDOW, vb.device())?))
-        } else {
-            None
-        };
+        let window_tables =
+            if window { Some((rel_table(&rel_h, rel_len, WINDOW, vb.device())?, rel_table(&rel_w, rel_len, WINDOW, vb.device())?)) } else { None };
         Ok(Self {
             qkv: linear(HIDDEN, 3 * HIDDEN, vb.pp("qkv"))?,
             proj: linear(HIDDEN, HIDDEN, vb.pp("proj"))?,
