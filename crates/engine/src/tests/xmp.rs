@@ -75,6 +75,47 @@ fn only(s: &Session) -> PhotoId {
     s.catalog.photos().next().unwrap().id
 }
 
+/// A matte stored with an AI mask goes into the sidecar with the other develop settings and comes
+/// back from it exactly (the generic `lc:settings` path: no special handling for `seg` or `matte`).
+#[test]
+fn an_ai_mask_matte_survives_the_sidecar() {
+    use lightcraft_develop::{Mask, MaskComponent, MaskOp, MaskShape, SegMask};
+    let src = temp_dir("matte-src");
+    let lib = temp_dir("matte-lib");
+    write_png(&src.join("hair.png"), 3);
+    let mut s = Session::new().with_fs();
+    s.open_library(&lib, false).unwrap();
+    s.execute("library.import", &json!({"paths": [src.join("hair.png").to_string_lossy()]})).unwrap();
+    let id = only(&s);
+    let alpha: Vec<f32> = (0..16 * 16).map(|i| (i % 16) as f32 / 15.0).collect();
+    let shape = MaskShape::Prompt {
+        text: "person".into(),
+        seg: Some(SegMask::from_logits(8, &[3.0; 64])),
+        detail: vec![],
+        edge: 0.0,
+        matte: vec![SegMask::from_alpha_in(16, &alpha, [0.25, 0.25, 0.75, 0.75])],
+        matting: true,
+    };
+    let mut d = (*s.develop_of(id).unwrap()).clone();
+    d.masks.push(Mask { id: 1, components: vec![MaskComponent { name: None, op: MaskOp::Add, invert: false, shape }], ..Default::default() });
+    s.set_develop(id, d, "AI Mask Matte").unwrap();
+    let edited = s.develop_of(id).unwrap();
+    s.execute("photo.saveMetadataToFile", &json!({})).unwrap();
+    drop(s);
+
+    std::fs::remove_dir_all(&lib).unwrap();
+    let mut s = Session::new().with_fs();
+    s.open_library(&lib, false).unwrap();
+    let r = s.execute("library.import", &json!({"paths": [src.to_string_lossy()]})).unwrap();
+    assert_eq!(r["sidecars"], 1, "{r}");
+    let back = s.develop_of(only(&s)).unwrap();
+    assert_eq!(*back, *edited, "develop settings restored exactly");
+    let MaskShape::Prompt { matte, matting, .. } = &back.masks[0].components[0].shape else { panic!("a Prompt mask") };
+    assert!(*matting && matte.len() == 1 && matte[0].rect == Some([0.25, 0.25, 0.75, 0.75]) && matte[0].logits().is_some());
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&lib);
+}
+
 #[test]
 fn save_delete_library_reimport_restores_edits() {
     let src = temp_dir("roundtrip-src");

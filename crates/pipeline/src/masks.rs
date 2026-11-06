@@ -280,12 +280,14 @@ pub fn shape_alpha(shape: &MaskShape, frame: &Frame, w: usize, h: usize, img: &R
             }
             smooth_plane(&mut out, 0.01 * frame_px(frame, w));
         }
-        MaskShape::Object { seg, detail, edge, .. } | MaskShape::Prompt { seg, detail, edge, .. } if seg.is_some() || !detail.is_empty() => {
+        MaskShape::Object { seg, detail, edge, matte, .. } | MaskShape::Prompt { seg, detail, edge, matte, .. }
+            if seg.is_some() || !detail.is_empty() || !matte.is_empty() =>
+        {
             // Edge: below 0 a steeper transition (up to 8× the logits), above 0 feathered (up to
             // 2 % of the long edge, so previews and exports match)
             let e = (*edge / 100.0).clamp(-1.0, 1.0) as f32;
             let gain = if e < 0.0 { 1.0 - 7.0 * e } else { 1.0 };
-            sample_seg(seg.as_ref(), detail, gain, frame, w, h, log_l, &mut out);
+            sample_seg(seg.as_ref(), detail, matte, gain, frame, w, h, log_l, &mut out);
             if e > 0.0 {
                 smooth_plane(&mut out, e * 0.02 * frame_px(frame, w));
             }
@@ -356,6 +358,56 @@ impl SegGrid {
     }
 }
 
+/// A decoded matte tile ([`SegMask::cells`]): one byte per cell, so a frame's worth of tiles
+/// stays bounded.
+struct MatteGrid {
+    cells: Vec<i8>,
+    side: usize,
+    r: [f64; 4],
+}
+
+impl MatteGrid {
+    fn new(tile: &SegMask) -> Option<MatteGrid> {
+        Some(MatteGrid { cells: tile.cells()?, side: tile.side as usize, r: tile.bounds()? })
+    }
+
+    fn contains(&self, n: Point) -> bool {
+        n.x >= self.r[0] && n.x <= self.r[2] && n.y >= self.r[1] && n.y <= self.r[3]
+    }
+
+    /// The bilinearly sampled logit at normalized image point `n`, like [`SegGrid::logit`].
+    fn logit(&self, n: Point) -> f32 {
+        let side = self.side;
+        let at = |x: usize, y: usize| self.cells.get(y.min(side - 1) * side + x.min(side - 1)).map_or(-16.0, |c| f32::from(*c) / lightcraft_develop::segmask::SCALE);
+        let u = (n.x - self.r[0]) / (self.r[2] - self.r[0]);
+        let v = (n.y - self.r[1]) / (self.r[3] - self.r[1]);
+        let (fx, fy) = ((u * side as f64 - 0.5) as f32, (v * side as f64 - 0.5) as f32);
+        let (fx, fy) = (fx.clamp(0.0, (side - 1) as f32), fy.clamp(0.0, (side - 1) as f32));
+        let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+        let top = at(x0, y0) * (1.0 - tx) + at(x0 + 1, y0) * tx;
+        let bot = at(x0, y0 + 1) * (1.0 - tx) + at(x0 + 1, y0 + 1) * tx;
+        top * (1.0 - ty) + bot * ty
+    }
+}
+
+/// The matte tiles that are drawn: at most `MAX_MATTE_TILES`, and at most `MAX_MATTE_CELLS` cells
+/// together (a hostile document can hold more; the rest are ignored undecoded). Damaged tiles
+/// are skipped.
+fn matte_grids(matte: &[SegMask]) -> Vec<MatteGrid> {
+    use lightcraft_develop::segmask::{MAX_MATTE_CELLS, MAX_MATTE_TILES};
+    let mut cells = 0usize;
+    let mut out = Vec::new();
+    for t in matte.iter().take(MAX_MATTE_TILES) {
+        cells = cells.saturating_add((t.side as usize).saturating_mul(t.side as usize));
+        if cells > MAX_MATTE_CELLS {
+            break;
+        }
+        out.extend(MatteGrid::new(t));
+    }
+    out
+}
+
 /// [`sample_seg`]'s window, in grid cells (Gaussian sigma): the width of the band bilinear
 /// enlargement leaves uncertain, about a cell on either side of the contour.
 const SEG_WINDOW: f64 = 1.5;
@@ -379,12 +431,18 @@ const SEG_EPS: f32 = 0.01;
 /// window is all inside or all outside (|mean logit| ≥ 7, times `gain`) keep their sample exactly,
 /// as do those where the photo has no edge to follow. Refine Edges
 /// then works on the combined mask ([`evaluate_one`]) and finds these edges already in place.
+///
+/// Alpha-matte tiles (`matte`: soft per-pixel coverage of the selection's edge band) win inside
+/// their rectangles (the highest where they overlap) and are not steered by the photo: they
+/// already are an alpha, so the guided filter would only move their edge. `gain` still scales
+/// their logits (a negative Edge hardens a matte too).
 #[allow(clippy::too_many_arguments)]
-fn sample_seg(seg: Option<&SegMask>, detail: &[SegMask], gain: f32, frame: &Frame, w: usize, h: usize, log_l: &Plane, out: &mut Plane) {
+fn sample_seg(seg: Option<&SegMask>, detail: &[SegMask], matte: &[SegMask], gain: f32, frame: &Frame, w: usize, h: usize, log_l: &Plane, out: &mut Plane) {
     let coarse = seg.and_then(SegGrid::new);
     // (capped: a hostile document can hold many)
     let patches: Vec<SegGrid> = detail.iter().take(lightcraft_develop::segmask::MAX_DETAIL).filter_map(SegGrid::new).collect();
-    if coarse.is_none() && patches.is_empty() {
+    let tiles = matte_grids(matte);
+    if coarse.is_none() && patches.is_empty() && tiles.is_empty() {
         return;
     }
     let m = frame.out_to_mask(w, h);
@@ -399,6 +457,17 @@ fn sample_seg(seg: Option<&SegMask>, detail: &[SegMask], gain: f32, frame: &Fram
     let cell = coarse.iter().chain(&patches).map(|g| g.cell_px(frame, w)).fold(0.0, f64::max);
     if cell >= 1.0 {
         guided_cross_fast(log_l, out, (SEG_WINDOW * cell) as f32, SEG_EPS, |mean| 1.0 - smooth(3.0 * gain, 7.0 * gain, mean.abs()));
+    }
+    // (after the guided filter, so a matte's pixels keep their exact sample)
+    if !tiles.is_empty() {
+        for_rows(&mut out.data, w, |y, row| {
+            for (x, v) in row.iter_mut().enumerate() {
+                let n = m.apply(Point::new(x as f64 + 0.5, y as f64 + 0.5));
+                if let Some(l) = tiles.iter().filter(|t| t.contains(n)).map(|t| t.logit(n)).reduce(f32::max) {
+                    *v = l * gain;
+                }
+            }
+        });
     }
     out.map_in_place(|l| 1.0 / (1.0 + (-l).exp()));
 }

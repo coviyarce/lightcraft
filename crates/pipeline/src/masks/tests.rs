@@ -22,8 +22,8 @@ fn stored_segmentations_render_at_any_size_and_follow_the_crop() {
     let logits: Vec<f32> = (0..side * side).map(|i| if i % side < side / 2 { 12.0 } else { -12.0 }).collect();
     let seg = SegMask::from_logits(side, &logits);
     for shape in [
-        MaskShape::Object { hint: vec![Point::new(0.25, 0.5)], exclude: vec![], seg: Some(seg.clone()), detail: vec![], edge: 0.0 },
-        MaskShape::Prompt { text: "left".into(), seg: Some(seg.clone()), detail: vec![], edge: 0.0 },
+        MaskShape::Object { hint: vec![Point::new(0.25, 0.5)], exclude: vec![], seg: Some(seg.clone()), detail: vec![], edge: 0.0, matte: vec![], matting: false },
+        MaskShape::Prompt { text: "left".into(), seg: Some(seg.clone()), detail: vec![], edge: 0.0, matte: vec![], matting: false },
     ] {
         for (w, h) in [(40, 20), (400, 200)] {
             let a = shape_alpha(&shape, &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
@@ -38,7 +38,7 @@ fn stored_segmentations_render_at_any_size_and_follow_the_crop() {
     let mut d = DevelopSettings::default();
     d.crop.geometry.rect = lightcraft_geom::Rect::from_center(Point::new(0.75, 0.5), 0.5, 1.0);
     let f = Frame::new(40, 20, &d, true);
-    let shape = MaskShape::Prompt { text: "left".into(), seg: Some(seg), detail: vec![], edge: 0.0 };
+    let shape = MaskShape::Prompt { text: "left".into(), seg: Some(seg), detail: vec![], edge: 0.0, matte: vec![], matting: false };
     let a = shape_alpha(&shape, &f, 20, 20, &Rgb32f::new(20, 20), &Plane::new(20, 20), 0.0, None);
     assert!(a.data.iter().all(|v| *v < 0.05));
 }
@@ -50,7 +50,7 @@ fn detail_patches_replace_the_coarse_mask_inside_their_rectangle() {
     let side = 16;
     let l: Vec<f32> = (0..side * side).map(|i| if i % side < side / 2 { 12.0 } else { -12.0 }).collect();
     let patch = SegMask::from_logits_in(side, &l, [0.5, 0.0, 1.0, 1.0]);
-    let shape = MaskShape::Object { hint: vec![Point::new(0.6, 0.5)], exclude: vec![], seg: Some(coarse), detail: vec![patch], edge: 0.0 };
+    let shape = MaskShape::Object { hint: vec![Point::new(0.6, 0.5)], exclude: vec![], seg: Some(coarse), detail: vec![patch], edge: 0.0, matte: vec![], matting: false };
     let (w, h) = (200, 100);
     let a = shape_alpha(&shape, &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
     assert!(a.get(20, 50) < 0.01, "outside the patch: the coarse mask");
@@ -65,7 +65,7 @@ fn a_hostile_number_of_detail_patches_is_capped() {
     let side = 1024;
     let l: Vec<f32> = vec![12.0; side * side];
     let patch = SegMask::from_logits_in(side, &l, [0.0, 0.0, 0.5, 1.0]);
-    let shape = MaskShape::Object { hint: vec![Point::new(0.2, 0.5)], exclude: vec![], seg: None, detail: vec![patch; 20_000], edge: 0.0 };
+    let shape = MaskShape::Object { hint: vec![Point::new(0.2, 0.5)], exclude: vec![], seg: None, detail: vec![patch; 20_000], edge: 0.0, matte: vec![], matting: false };
     let (w, h) = (64, 32);
     let t = std::time::Instant::now();
     let a = shape_alpha(&shape, &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
@@ -80,7 +80,7 @@ fn the_edge_setting_hardens_or_feathers_the_transition() {
     let seg = SegMask::from_logits(side, &l);
     let (w, h) = (400, 40);
     let soft_px = |edge: f64| {
-        let shape = MaskShape::Prompt { text: "x".into(), seg: Some(seg.clone()), detail: vec![], edge };
+        let shape = MaskShape::Prompt { text: "x".into(), seg: Some(seg.clone()), detail: vec![], edge, matte: vec![], matting: false };
         let a = shape_alpha(&shape, &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
         assert!(a.get(2, h / 2) > 0.9 && a.get(w - 3, h / 2) < 0.1, "still the same selection at {edge}");
         (0..w).filter(|x| (0.1..0.9).contains(&a.get(*x, h / 2))).count()
@@ -129,7 +129,7 @@ fn across_disc_edge(a: &Plane, d: i32) -> f32 {
 fn ai_masks_follow_the_photos_edge_when_enlarged() {
     let (n, side) = (512, 32); // 16 px cells, as a 288² grid on a ~4600 px export
     let (img, log_l, seg) = disc_scene(n, side);
-    let shape = MaskShape::Prompt { text: "disc".into(), seg: Some(seg), detail: vec![], edge: 0.0 };
+    let shape = MaskShape::Prompt { text: "disc".into(), seg: Some(seg), detail: vec![], edge: 0.0, matte: vec![], matting: false };
     let f = frame(n, n);
     let a = shape_alpha(&shape, &f, n, n, &img, &log_l, 0.0, None);
     for d in [1, 2] {
@@ -163,7 +163,7 @@ fn refine_edges_on_an_enlarged_ai_mask_neither_halos_nor_tightens() {
             name: None,
             op: MaskOp::Add,
             invert: false,
-            shape: MaskShape::Prompt { text: "disc".into(), seg: Some(seg.clone()), detail: vec![], edge: 0.0 },
+            shape: MaskShape::Prompt { text: "disc".into(), seg: Some(seg.clone()), detail: vec![], edge: 0.0, matte: vec![], matting: false },
         }],
         refine,
         ..Default::default()
@@ -188,7 +188,7 @@ fn enlarged_ai_masks_put_the_edge_in_the_same_place_at_any_size() {
     let mut edges = Vec::new();
     for n in [256, 512, 1024] {
         let (img, log_l, seg) = disc_scene(n, side);
-        let shape = MaskShape::Prompt { text: "disc".into(), seg: Some(seg), detail: vec![], edge: 0.0 };
+        let shape = MaskShape::Prompt { text: "disc".into(), seg: Some(seg), detail: vec![], edge: 0.0, matte: vec![], matting: false };
         let a = shape_alpha(&shape, &frame(n, n), n, n, &img, &log_l, 0.0, None);
         // the edge's sub-pixel position along the row: the integral of alpha past the centre
         let covered: f32 = (n / 2..n).map(|x| a.get(x, n / 2)).sum();
@@ -203,13 +203,15 @@ fn ai_shapes_without_a_segmentation_select_nothing() {
     let f = frame(30, 30);
     let (img, l) = (Rgb32f::new(30, 30), Plane::new(30, 30));
     for shape in [
-        MaskShape::Object { hint: vec![], exclude: vec![], seg: None, detail: vec![], edge: 0.0 },
-        MaskShape::Prompt { text: "sky".into(), seg: None, detail: vec![], edge: 0.0 },
+        MaskShape::Object { hint: vec![], exclude: vec![], seg: None, detail: vec![], edge: 0.0, matte: vec![], matting: false },
+        MaskShape::Prompt { text: "sky".into(), seg: None, detail: vec![], edge: 0.0, matte: vec![], matting: false },
         MaskShape::Prompt {
             text: "sky".into(),
             seg: Some(SegMask { side: 4, data: "damaged!".into(), rect: None, grid: None }),
             detail: vec![],
             edge: 0.0,
+            matte: vec![],
+            matting: false,
         },
     ] {
         assert!(shape_alpha(&shape, &f, 30, 30, &img, &l, 0.0, None).data.iter().all(|v| *v == 0.0));
@@ -639,4 +641,111 @@ fn intersect_first_component_selects_its_shape() {
     let m = Mask { components: vec![MaskComponent { name: None, op: MaskOp::Intersect, invert: false, shape }], ..Default::default() };
     let a = evaluate_one(&m, &f, 100, 100, &img, &l, 0.0, None);
     assert!(a.get(50, 50) > 0.99 && a.get(5, 5) < 0.01, "intersect first: {} {}", a.get(50, 50), a.get(5, 5));
+}
+
+/// A `side × side` alpha tile over `rect` whose alpha is `f(u, v)` of the position inside the tile.
+fn matte_tile(side: usize, rect: [f64; 4], f: impl Fn(f64, f64) -> f32) -> SegMask {
+    let a: Vec<f32> = (0..side * side).map(|i| f(((i % side) as f64 + 0.5) / side as f64, ((i / side) as f64 + 0.5) / side as f64)).collect();
+    SegMask::from_alpha_in(side, &a, rect)
+}
+
+fn prompt_with_matte(seg: Option<SegMask>, matte: Vec<SegMask>, edge: f64) -> MaskShape {
+    MaskShape::Prompt { text: "x".into(), seg, detail: vec![], edge, matte, matting: true }
+}
+
+#[test]
+fn a_matte_tile_wins_inside_its_rectangle_and_leaves_the_outside_alone() {
+    // the coarse selection holds the left quarter; a tile over the right half ramps 0 → 1 across
+    let l: Vec<f32> = (0..16 * 16).map(|i| if i % 16 < 4 { 12.0 } else { -12.0 }).collect();
+    let coarse = SegMask::from_logits(16, &l);
+    let tile = matte_tile(32, [0.5, 0.0, 1.0, 1.0], |u, _| u as f32);
+    let (w, h) = (400, 100);
+    let with = shape_alpha(&prompt_with_matte(Some(coarse.clone()), vec![tile], 0.0), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
+    let without = shape_alpha(&prompt_with_matte(Some(coarse), vec![], 0.0), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
+    for x in 0..w / 2 - 1 {
+        assert_eq!(with.get(x, 50), without.get(x, 50), "outside the tile, x = {x}");
+    }
+    // inside: the tile's own soft alpha (0.25 at a quarter of the tile, 0.5 in the middle, 0.75 at three quarters)
+    for (x, want) in [(250, 0.25), (300, 0.5), (350, 0.75)] {
+        assert!((with.get(x, 50) - want).abs() < 0.04, "x = {x}: {} vs {want}", with.get(x, 50));
+        assert!(without.get(x, 50) < 0.01);
+    }
+}
+
+#[test]
+fn a_matte_alone_selects_its_tile() {
+    let tile = matte_tile(8, [0.0, 0.0, 0.5, 1.0], |_, _| 1.0);
+    let (w, h) = (40, 20);
+    let a = shape_alpha(&prompt_with_matte(None, vec![tile], 0.0), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
+    assert!(a.get(2, 10) > 0.99 && a.get(w - 3, 10) < 0.01);
+}
+
+/// A matte already is an alpha: the photo's edge, which steers a coarse grid, does not move it. The
+/// disc in the photo has radius 0.3; the matte's has 0.25, and the matte's edge stays at 0.25.
+#[test]
+fn the_photos_edge_does_not_steer_a_matte() {
+    let (n, side) = (512, 32);
+    let (img, log_l, seg) = disc_scene(n, side);
+    let tile = matte_tile(256, [0.0, 0.0, 1.0, 1.0], |u, v| if (u - 0.5).hypot(v - 0.5) < 0.25 { 1.0 } else { 0.0 });
+    let f = frame(n, n);
+    let crossing = |a: &Plane| (n / 2..n).find(|x| a.get(*x, n / 2) < 0.5).unwrap_or(n);
+    let steered = shape_alpha(&prompt_with_matte(Some(seg.clone()), vec![], 0.0), &f, n, n, &img, &log_l, 0.0, None);
+    let matted = shape_alpha(&prompt_with_matte(Some(seg), vec![tile], 0.0), &f, n, n, &img, &log_l, 0.0, None);
+    assert!(crossing(&steered).abs_diff((0.8 * n as f64) as usize) <= 2, "the coarse grid follows the photo: {}", crossing(&steered));
+    assert!(crossing(&matted).abs_diff((0.75 * n as f64) as usize) <= 3, "the matte keeps its own edge: {}", crossing(&matted));
+}
+
+#[test]
+fn the_edge_setting_still_hardens_and_feathers_a_matte() {
+    let tile = matte_tile(32, [0.0, 0.0, 1.0, 1.0], |u, _| ((u - 0.5) * 3.0 + 0.5).clamp(0.0, 1.0) as f32);
+    let (w, h) = (400, 20);
+    let soft_px = |edge: f64| {
+        let a = shape_alpha(&prompt_with_matte(None, vec![tile.clone()], edge), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
+        (0..w).filter(|x| (0.1..0.9).contains(&a.get(*x, h / 2))).count()
+    };
+    let (hard, plain, soft) = (soft_px(-100.0), soft_px(0.0), soft_px(100.0));
+    assert!(hard < plain && plain < soft, "transition widths {hard} < {plain} < {soft}");
+}
+
+/// A preview and an export put a matte's edge in the same place of the photo.
+#[test]
+fn a_matte_edge_is_in_the_same_place_at_any_size() {
+    let tile = matte_tile(64, [0.2, 0.2, 0.8, 0.8], |u, _| ((u - 0.5) * 2.0 + 0.5).clamp(0.0, 1.0) as f32);
+    let mut edges = Vec::new();
+    for n in [128, 256, 512, 1024] {
+        let a = shape_alpha(&prompt_with_matte(None, vec![tile.clone()], 0.0), &frame(n, n), n, n, &Rgb32f::new(n, n), &Plane::new(n, n), 0.0, None);
+        // the edge's position along the row: the integral of alpha across the tile, in image widths
+        let covered: f32 = (0..n).map(|x| a.get(x, n / 2)).sum();
+        edges.push(f64::from(covered) / n as f64);
+    }
+    let (lo, hi) = edges.iter().fold((f64::MAX, f64::MIN), |(lo, hi), e| (lo.min(*e), hi.max(*e)));
+    assert!(hi - lo < 0.01, "selected width per size: {edges:?}");
+}
+
+#[test]
+fn a_hostile_number_of_matte_tiles_is_capped() {
+    // built in memory (a deserialized document is capped already): only the first MAX_MATTE_TILES
+    // are decoded and sampled, so this needs 24 MB, not 20 000 × 1 MB
+    let left = matte_tile(1024, [0.0, 0.0, 0.5, 1.0], |_, _| 1.0);
+    let right = matte_tile(8, [0.5, 0.0, 1.0, 1.0], |_, _| 1.0);
+    let mut tiles = vec![left; 20_000];
+    tiles[lightcraft_develop::segmask::MAX_MATTE_TILES] = right;
+    let (w, h) = (64, 32);
+    let t = std::time::Instant::now();
+    let a = shape_alpha(&prompt_with_matte(None, tiles, 0.0), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
+    assert!(a.get(5, 16) > 0.99, "the tiles within the cap are drawn");
+    assert!(a.get(60, 16) < 0.01, "the tile past the cap is ignored");
+    assert!(t.elapsed() < std::time::Duration::from_secs(20), "{:?}", t.elapsed());
+}
+
+#[test]
+fn damaged_or_absurd_matte_tiles_select_nothing_and_do_not_panic() {
+    let mut bad = matte_tile(8, [0.0, 0.0, 1.0, 1.0], |_, _| 1.0);
+    bad.side = 9; // size mismatch
+    let mut nan_rect = matte_tile(8, [0.0, 0.0, 1.0, 1.0], |_, _| 1.0);
+    nan_rect.rect = Some([f64::NAN, 0.0, 1.0, 1.0]);
+    let huge = SegMask { side: u32::MAX, data: String::new(), rect: None, grid: None };
+    let (w, h) = (16, 16);
+    let a = shape_alpha(&prompt_with_matte(None, vec![bad, nan_rect, huge], 0.0), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
+    assert!(a.data.iter().all(|v| *v < 0.01));
 }

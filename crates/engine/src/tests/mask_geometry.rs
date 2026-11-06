@@ -155,7 +155,7 @@ fn a_click_on_an_old_object_mask_goes_onto_the_photo_with_it() {
             name: None,
             op: MaskOp::Add,
             invert: false,
-            shape: MaskShape::Object { hint: vec![p], exclude: Vec::new(), seg: None, detail: Vec::new(), edge: 0.0 },
+            shape: MaskShape::Object { hint: vec![p], exclude: Vec::new(), seg: None, detail: Vec::new(), edge: 0.0, matte: vec![], matting: false },
         }],
         ..Default::default()
     }];
@@ -261,7 +261,7 @@ fn old_object_mask() -> (Session, lightcraft_catalog::PhotoId, DevelopSettings, 
             name: None,
             op: MaskOp::Add,
             invert: false,
-            shape: MaskShape::Object { hint: vec![p], exclude: Vec::new(), seg: None, detail: Vec::new(), edge: 0.0 },
+            shape: MaskShape::Object { hint: vec![p], exclude: Vec::new(), seg: None, detail: Vec::new(), edge: 0.0, matte: vec![], matting: false },
         }],
         ..Default::default()
     }];

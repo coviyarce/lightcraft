@@ -53,9 +53,9 @@ fn shape_from(kind: &str, p: &Value, c: &str) -> Result<MaskShape> {
                 .unwrap_or_default();
             MaskShape::ColorRange { samples, refine: f64_or(p, "refine", 50.0) }
         }
-        "object" => MaskShape::Object { hint: points(p, "points"), exclude: points(p, "exclude"), seg: seg_param(p), detail: vec![], edge: 0.0 },
+        "object" => MaskShape::Object { hint: points(p, "points"), exclude: points(p, "exclude"), seg: seg_param(p), detail: vec![], edge: 0.0, matte: vec![], matting: false },
         "prompt" => {
-            MaskShape::Prompt { text: str_param(p, "text").unwrap_or_default().trim().to_string(), seg: seg_param(p), detail: vec![], edge: 0.0 }
+            MaskShape::Prompt { text: str_param(p, "text").unwrap_or_default().trim().to_string(), seg: seg_param(p), detail: vec![], edge: 0.0, matte: vec![], matting: false }
         }
         other => {
             return Err(bad(
@@ -496,10 +496,10 @@ pub fn specs() -> Vec<CommandSpec> {
                     .iter()
                     .rposition(|x| matches!(x.shape, MaskShape::Object { .. }))
                     .ok_or_else(|| bad(c, "the mask has no Object selection (add one first)"))?;
-                let Some(MaskShape::Object { hint, exclude: ex, edge, .. }) = m.components.get(k).map(|x| &x.shape) else {
+                let Some(MaskShape::Object { hint, exclude: ex, edge, matting, .. }) = m.components.get(k).map(|x| &x.shape) else {
                     return Err(bad(c, "not an Object component"));
                 };
-                let (mut hint, mut ex, edge) = (hint.clone(), ex.clone(), *edge);
+                let (mut hint, mut ex, edge, matting) = (hint.clone(), ex.clone(), *edge, *matting);
                 // clicks still on their way to the model count too
                 if let Some(pending) = s.segmenter.pending_clicks().filter(|q| (q.photo, q.mask, q.comp) == (id, mid, k)) {
                     (hint, ex) = (pending.hint.clone(), pending.exclude.clone());
@@ -522,7 +522,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 masks_edit(s, c, "Object Mask", |masks, _| {
                     let i = find(masks, mid, c)?;
                     if let Some(comp) = masks[i].components.get_mut(k) {
-                        comp.shape = MaskShape::Object { hint, exclude: ex, seg, detail: vec![], edge };
+                        comp.shape = MaskShape::Object { hint, exclude: ex, seg, detail: vec![], edge, matte: vec![], matting };
                     }
                     Ok(())
                 })?;

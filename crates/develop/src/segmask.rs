@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 /// Logits are stored in steps of 1/`SCALE`, clamped to ±127/`SCALE` (≈ ±15.9: a sigmoid of
 /// 1 − 1.2e-7, i.e. fully in or out).
-const SCALE: f32 = 8.0;
+pub const SCALE: f32 = 8.0;
 /// Largest grid a stored segmentation may claim (hostile input caps the allocation).
 pub const MAX_SIDE: usize = 1024;
 
@@ -51,6 +51,29 @@ impl SegMask {
         SegMask { rect: Some(rect), ..SegMask::from_logits(side, logits) }
     }
 
+    /// From `side × side` alpha values (0..1 coverage) over the part `rect` of the image, stored
+    /// as logits like the model's: `ln(a / (1 − a))` clamped to the stored range, so an alpha of
+    /// 0 or 1 is fully out or in. The 1/[`SCALE`] quantization keeps the alpha error below 0.03
+    /// near 0.5 and 0.011 near 0.1. Non-finite values count as 0.
+    pub fn from_alpha_in(side: usize, alpha: &[f32], rect: [f64; 4]) -> SegMask {
+        const LIMIT: f32 = 127.0 / SCALE;
+        let logits: Vec<f32> = alpha
+            .iter()
+            .take(side.saturating_mul(side))
+            .map(|a| {
+                let a = if a.is_finite() { a.clamp(0.0, 1.0) } else { 0.0 };
+                if a <= 0.0 {
+                    -LIMIT
+                } else if a >= 1.0 {
+                    LIMIT
+                } else {
+                    (a / (1.0 - a)).ln().clamp(-LIMIT, LIMIT)
+                }
+            })
+            .collect();
+        SegMask::from_logits_in(side, &logits, rect)
+    }
+
     /// The covered part, normalized (the whole image without a `rect`); `None` when damaged.
     pub fn bounds(&self) -> Option<[f64; 4]> {
         let r = self.rect.unwrap_or([0.0, 0.0, 1.0, 1.0]);
@@ -59,13 +82,20 @@ impl SegMask {
 
     /// The logits, or `None` when the data is damaged or claims an absurd size.
     pub fn logits(&self) -> Option<Vec<f32>> {
+        Some(self.cells()?.iter().map(|c| f32::from(*c) / SCALE).collect())
+    }
+
+    /// The stored cells (logit × [`SCALE`], one byte each), or `None` when the data is damaged
+    /// or claims an absurd size. A matte keeps these as they are: a quarter of the memory of
+    /// [`SegMask::logits`].
+    pub fn cells(&self) -> Option<Vec<i8>> {
         let side = self.side as usize;
         if side == 0 || side > MAX_SIDE {
             return None;
         }
         let z = base64_decode(&self.data)?;
         let q = miniz_oxide::inflate::decompress_to_vec_with_limit(&z, side * side).ok()?;
-        (q.len() == side * side).then(|| q.iter().map(|b| f32::from(*b as i8) / SCALE).collect())
+        (q.len() == side * side).then(|| q.iter().map(|b| *b as i8).collect())
     }
 }
 
@@ -146,6 +176,43 @@ pub(crate) fn de_detail<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Se
                     Some(m) => out.push(m),
                     None => return Ok(out),
                 }
+            }
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(out)
+        }
+    }
+    d.deserialize_seq(Capped)
+}
+
+/// Most alpha-matte tiles one AI mask component keeps (the app makes a few around the selection's
+/// edge; each costs a decode per render).
+pub const MAX_MATTE_TILES: usize = 24;
+/// Most cells all of a component's matte tiles may hold together (one 26 MP frame, one byte per
+/// cell), whatever sizes they claim.
+pub const MAX_MATTE_CELLS: usize = 24 << 20;
+
+/// Deserialize a component's matte tiles, keeping at most [`MAX_MATTE_TILES`] and
+/// [`MAX_MATTE_CELLS`] cells (the rest are skipped without being decoded).
+pub(crate) fn de_matte<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<SegMask>, D::Error> {
+    struct Capped;
+    impl<'de> serde::de::Visitor<'de> for Capped {
+        type Value = Vec<SegMask>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a list of matte tiles")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<SegMask>, A::Error> {
+            let mut out: Vec<SegMask> = Vec::new();
+            let mut cells = 0usize;
+            while out.len() < MAX_MATTE_TILES {
+                let Some(m) = seq.next_element::<SegMask>()? else {
+                    return Ok(out);
+                };
+                let n = (m.side as usize).saturating_mul(m.side as usize);
+                if cells.saturating_add(n) > MAX_MATTE_CELLS {
+                    break;
+                }
+                cells += n;
+                out.push(m);
             }
             while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
             Ok(out)
@@ -244,13 +311,55 @@ mod tests {
                 name: None,
                 op: crate::MaskOp::Add,
                 invert: false,
-                shape: crate::MaskShape::Prompt { text: "x".into(), seg: None, detail: vec![SegMask::from_logits(4, &[1.0; 16]); 50], edge: 0.0 },
+                shape: crate::MaskShape::Prompt { text: "x".into(), seg: None, detail: vec![SegMask::from_logits(4, &[1.0; 16]); 50], edge: 0.0, matte: vec![], matting: false },
             }],
             ..Default::default()
         });
         let back: crate::DevelopSettings = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
         let crate::MaskShape::Prompt { detail, .. } = &back.masks[0].components[0].shape else { panic!("a Prompt") };
         assert_eq!(detail.len(), MAX_DETAIL);
+    }
+
+    #[test]
+    fn alpha_round_trips_within_the_quantization() {
+        let side = 16;
+        let a: Vec<f32> = (0..side * side).map(|i| i as f32 / (side * side - 1) as f32).collect();
+        let m = SegMask::from_alpha_in(side, &a, [0.1, 0.2, 0.5, 0.6]);
+        assert_eq!(m.rect, Some([0.1, 0.2, 0.5, 0.6]));
+        let back = m.logits().unwrap();
+        for (a, l) in a.iter().zip(&back) {
+            let got = 1.0 / (1.0 + (-l).exp());
+            assert!((a - got).abs() <= 0.03, "alpha {a} came back {got}");
+        }
+        // the ends are fully out / in, and junk counts as out
+        let m = SegMask::from_alpha_in(2, &[0.0, 1.0, f32::NAN, -3.0], [0.0, 0.0, 1.0, 1.0]);
+        let l = m.logits().unwrap();
+        assert!(l[0] < -15.0 && l[1] > 15.0 && l[2] < -15.0 && l[3] < -15.0);
+        // too few values: the rest select nothing rather than panic
+        assert!(SegMask::from_alpha_in(4, &[0.5; 3], [0.0, 0.0, 1.0, 1.0]).logits().is_none());
+    }
+
+    #[test]
+    fn a_hostile_document_keeps_at_most_max_matte_tiles() {
+        let tile = serde_json::to_value(SegMask::from_alpha_in(4, &[0.5; 16], [0.0, 0.0, 1.0, 1.0])).unwrap();
+        let shape = serde_json::json!({"kind": "object", "hint": [{"x": 0.5, "y": 0.5}], "matte": vec![tile.clone(); 10_000], "matting": true});
+        let s: crate::MaskShape = serde_json::from_value(shape).unwrap();
+        let crate::MaskShape::Object { matte, matting, .. } = s else { panic!("an Object") };
+        assert_eq!(matte.len(), MAX_MATTE_TILES);
+        assert!(matting);
+        // tiles that claim huge grids stop at the cell budget (never decoded)
+        let big = serde_json::json!({"side": 1025, "data": "", "rect": [0.0, 0.0, 1.0, 1.0]});
+        let shape = serde_json::json!({"kind": "prompt", "text": "x", "matte": vec![big; 100]});
+        let s: crate::MaskShape = serde_json::from_value(shape).unwrap();
+        let crate::MaskShape::Prompt { matte, .. } = s else { panic!("a Prompt") };
+        assert_eq!(matte.len(), MAX_MATTE_CELLS / (1025 * 1025));
+        // an older document without the fields loads with an empty matte, and none is written back
+        let old = serde_json::json!({"kind": "prompt", "text": "x"});
+        let s: crate::MaskShape = serde_json::from_value(old).unwrap();
+        let crate::MaskShape::Prompt { matte, matting, .. } = &s else { panic!("a Prompt") };
+        assert!(matte.is_empty() && !matting);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("matte") && !json.contains("matting"), "{json}");
     }
 
     #[test]

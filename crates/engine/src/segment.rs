@@ -663,8 +663,9 @@ impl Session {
                 let Some(d) = self.develop_of(photo) else { return };
                 let mut d = (*d).clone();
                 let Some(c) = d.masks.iter_mut().find(|m| m.id == mask).and_then(|m| m.components.get_mut(comp)) else { return };
-                let MaskShape::Object { edge, .. } = c.shape else { return };
-                c.shape = MaskShape::Object { hint: latest.hint, exclude: latest.exclude, seg: Some(seg), detail: vec![], edge };
+                let MaskShape::Object { edge, matting, .. } = c.shape else { return };
+                // (a new selection drops the old matte; `matting` stays on)
+                c.shape = MaskShape::Object { hint: latest.hint, exclude: latest.exclude, seg: Some(seg), detail: vec![], edge, matte: vec![], matting };
                 match self.set_develop(photo, d, "Object Mask") {
                     Ok(()) => {
                         polled.changed = true;

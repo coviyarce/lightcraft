@@ -228,7 +228,7 @@ fn object_clicks_are_capped() {
             name: None,
             op: lightcraft_develop::MaskOp::Add,
             invert: false,
-            shape: lightcraft_develop::MaskShape::Object { hint: many, exclude: vec![], seg: None, detail: vec![], edge: 0.0 },
+            shape: lightcraft_develop::MaskShape::Object { hint: many, exclude: vec![], seg: None, detail: vec![], edge: 0.0, matte: vec![], matting: false },
         }],
         ..Default::default()
     });

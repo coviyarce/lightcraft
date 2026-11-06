@@ -1053,6 +1053,13 @@ pub enum MaskShape {
         /// Edge −100..100: below 0 harder (a steeper transition), above 0 softer (feathered).
         #[serde(default, skip_serializing_if = "is_zero")]
         edge: f64,
+        /// Alpha matting of the selection's edge band: soft per-pixel coverage tiles, stored as
+        /// logits like `detail`, used before `detail` and `seg` inside their rectangles.
+        #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::segmask::de_matte")]
+        matte: Vec<crate::SegMask>,
+        /// Keep the matte up to date when the selection changes (off: `matte` stays empty).
+        #[serde(default, skip_serializing_if = "is_false")]
+        matting: bool,
     },
     /// Everything a description names ("sky", "the red car": SAM 3 concept prompts); `seg` is
     /// the segmentation computed for it.
@@ -1065,6 +1072,13 @@ pub enum MaskShape {
         /// Edge −100..100, as for `Object`.
         #[serde(default, skip_serializing_if = "is_zero")]
         edge: f64,
+        /// Alpha matting of the selection's edge band: soft per-pixel coverage tiles, stored as
+        /// logits like `detail`, used before `detail` and `seg` inside their rectangles.
+        #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::segmask::de_matte")]
+        matte: Vec<crate::SegMask>,
+        /// Keep the matte up to date when the selection changes (off: `matte` stays empty).
+        #[serde(default, skip_serializing_if = "is_false")]
+        matting: bool,
     },
     People {
         person: u32,
@@ -1155,19 +1169,19 @@ impl DevelopSettings {
 
 fn visit_shape(shape: &MaskShape, f: &mut impl FnMut(&crate::SegMask)) {
     match shape {
-        MaskShape::Object { seg, detail, .. } => {
+        MaskShape::Object { seg, detail, matte, .. } => {
             if let Some(seg) = seg {
                 f(seg);
             }
-            for d in detail {
+            for d in detail.iter().chain(matte.iter()) {
                 f(d);
             }
         }
-        MaskShape::Prompt { seg, detail, .. } => {
+        MaskShape::Prompt { seg, detail, matte, .. } => {
             if let Some(seg) = seg {
                 f(seg);
             }
-            for d in detail {
+            for d in detail.iter().chain(matte.iter()) {
                 f(d);
             }
         }
@@ -1177,19 +1191,19 @@ fn visit_shape(shape: &MaskShape, f: &mut impl FnMut(&crate::SegMask)) {
 
 fn visit_shape_mut(shape: &mut MaskShape, f: &mut impl FnMut(&mut crate::SegMask)) {
     match shape {
-        MaskShape::Object { seg, detail, .. } => {
+        MaskShape::Object { seg, detail, matte, .. } => {
             if let Some(seg) = seg.as_mut() {
                 f(seg);
             }
-            for d in detail {
+            for d in detail.iter_mut().chain(matte.iter_mut()) {
                 f(d);
             }
         }
-        MaskShape::Prompt { seg, detail, .. } => {
+        MaskShape::Prompt { seg, detail, matte, .. } => {
             if let Some(seg) = seg.as_mut() {
                 f(seg);
             }
-            for d in detail {
+            for d in detail.iter_mut().chain(matte.iter_mut()) {
                 f(d);
             }
         }

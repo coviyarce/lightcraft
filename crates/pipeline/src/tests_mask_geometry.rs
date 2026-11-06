@@ -57,6 +57,8 @@ fn subject() -> MaskShape {
         seg: Some(SegMask::from_logits(SIDE, &logits)),
         detail: Vec::new(),
         edge: 0.0,
+        matte: vec![],
+        matting: false,
     }
 }
 

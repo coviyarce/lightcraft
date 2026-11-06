@@ -35,6 +35,8 @@ fn settings_with_seg(seg: SegMask, exposure: f64) -> DevelopSettings {
                 seg: Some(seg),
                 detail: vec![],
                 edge: 0.0,
+                matte: vec![],
+                matting: false,
             },
         }],
         ..Default::default()
@@ -56,6 +58,8 @@ fn object_mask(id: u32, seg: SegMask) -> Mask {
                 seg: Some(seg),
                 detail: vec![],
                 edge: 0.0,
+                matte: vec![],
+                matting: false,
             },
         }],
         ..Default::default()
@@ -389,4 +393,67 @@ fn omitted_shared_grid_table_clears_dangling_references() {
     // the history step carries its grid inline: nothing there to resolve, left as it was
     let MaskShape::Object { seg: Some(seg), .. } = &p.history[0].settings.masks[0].components[0].shape else { panic!("an Object mask") };
     assert_eq!(seg.data, blob, "the history step's inline grid is untouched");
+}
+
+/// A library saved by format 12 (AI masks without alpha-matte tiles) loads with an empty matte, is
+/// rewritten in this format, and loads again unchanged.
+#[test]
+fn v12_ai_masks_load_without_a_matte_and_are_upgraded() {
+    let (live, _, id, _) = masked_catalog(2);
+    let body = live.to_snapshot();
+    assert!(!body.contains("matte") && !body.contains("matting"), "an empty matte is not written");
+    let m = MemStore::new();
+    m.set(SNAPSHOT, format!("{{\"format\":\"lightcraft-catalog\",\"version\":12,\"seq\":2,\"catalog\":{body}}}\n").into_bytes());
+    m.set(LOG, Vec::new());
+    let (j, loaded, report) = open(&m);
+    assert_eq!(report.upgraded_from, Some(12));
+    assert_eq!(snapshot_version(&m), u64::from(VERSION));
+    let p = loaded.photo(id).unwrap();
+    let MaskShape::Object { seg: Some(_), matte, matting, .. } = &p.develop.masks[0].components[0].shape else { panic!("an Object mask") };
+    assert!(matte.is_empty() && !matting);
+    assert_eq!(loaded.to_snapshot(), live.to_snapshot());
+    drop(j);
+    let (_, again, report) = open(&m);
+    assert_eq!(report.upgraded_from, None);
+    assert_eq!(again.to_snapshot(), live.to_snapshot());
+}
+
+/// Matte tiles are grids like the others: a snapshot stores one shared by many history steps once,
+///.
+#[test]
+fn matte_tiles_share_snapshot_grids() {
+    let tile = SegMask::from_alpha_in(64, &vec![0.37f32; 64 * 64], [0.1, 0.1, 0.4, 0.4]);
+    let blob = tile.data.clone();
+    let mut c = Catalog::new();
+    let id = c.alloc_photo_id();
+    let add = Op::AddPhoto { photo: Box::new(Photo::new(id, Source::File { path: "/p/1.jpg".into() }, "1.jpg", "JPEG", 60, 40, "2026-01-01")) };
+    c.apply(add.clone()).unwrap();
+    let mut ops = vec![add];
+    for i in 1..=10 {
+        let mut s = settings_with_seg(SegMask::from_logits(8, &[1.0; 64]), f64::from(i) * 0.1);
+        let MaskShape::Object { matte, matting, .. } = &mut s.masks[0].components[0].shape else { panic!("an Object mask") };
+        (*matte, *matting) = (vec![tile.clone()], true);
+        let settings = Arc::new(s);
+        let op = Op::Batch {
+            ops: vec![
+                Op::SetDevelop { id, settings: settings.clone(), label: "Exposure".into(), edited: Some(format!("t{i}")) },
+                Op::PushHistory { id, step: HistoryStep { label: "Exposure".into(), settings } },
+            ],
+        };
+        c.apply(op.clone()).unwrap();
+        ops.push(op);
+    }
+    let m = MemStore::new();
+    let (mut j, _, _) = open(&m);
+    j.append(&ops).unwrap();
+    j.snapshot(&c).unwrap();
+    drop(j);
+    let snap = m.get(SNAPSHOT).unwrap();
+    assert_eq!(std::str::from_utf8(&snap).unwrap().match_indices(&blob).count(), 1, "one copy for every step");
+    let (_, loaded, report) = open(&m);
+    assert_eq!((report.upgraded_from, report.repaired.len()), (None, 0));
+    assert_eq!(loaded.to_snapshot(), c.to_snapshot());
+    let p = loaded.photo(id).unwrap();
+    let MaskShape::Object { matte, matting, .. } = &p.history[0].settings.masks[0].components[0].shape else { panic!("an Object mask") };
+    assert!(*matting && matte.len() == 1 && matte[0].data == blob && matte[0].grid.is_none());
 }

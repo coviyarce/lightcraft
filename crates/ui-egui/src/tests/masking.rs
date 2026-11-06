@@ -374,8 +374,8 @@ fn object_and_describe_masks_show_pins_that_select_but_do_not_move() {
     // a 16 × 16 segmentation found in columns 2..=5, rows 10..=13: centred on (0.25, 0.75)
     let blob: Vec<f32> = (0..16 * 16).map(|i| if (2..=5).contains(&(i % 16)) && (10..=13).contains(&(i / 16)) { 8.0 } else { -8.0 }).collect();
     let seg = SegMask::from_logits(16, &blob);
-    let object = MaskShape::Object { hint: vec![Point::new(0.6, 0.5)], exclude: vec![], seg: Some(seg.clone()), detail: vec![], edge: 0.0 };
-    let prompt = MaskShape::Prompt { text: "the boat".into(), seg: Some(seg), detail: vec![], edge: 0.0 };
+    let object = MaskShape::Object { hint: vec![Point::new(0.6, 0.5)], exclude: vec![], seg: Some(seg.clone()), detail: vec![], edge: 0.0, matte: vec![], matting: false };
+    let prompt = MaskShape::Prompt { text: "the boat".into(), seg: Some(seg), detail: vec![], edge: 0.0, matte: vec![], matting: false };
     exec(&mut h, "mask.add", json!({"kind": "radial", "center": [0.5, 0.5], "rx": 0.1, "ry": 0.1}));
     exec(&mut h, "mask.update", json!({"id": 1, "shape": object}));
     exec(&mut h, "mask.add", json!({"kind": "radial", "center": [0.5, 0.5], "rx": 0.1, "ry": 0.1}));
@@ -419,7 +419,7 @@ fn the_object_tool_selects_the_mask_whose_pin_is_clicked() {
     let dir = std::env::temp_dir().join(format!("lc-ui-pin-object-{}", std::process::id()));
     h.app.session.segmenter.dir = Some(dir.clone());
     h.app.session.segmenter.mirrors_file = Some(dir.join("none.txt"));
-    let object = |at: Point| MaskShape::Object { hint: vec![at], exclude: vec![], seg: None, detail: vec![], edge: 0.0 };
+    let object = |at: Point| MaskShape::Object { hint: vec![at], exclude: vec![], seg: None, detail: vec![], edge: 0.0, matte: vec![], matting: false };
     let radial = json!({"kind": "radial", "center": [0.5, 0.5], "rx": 0.1, "ry": 0.1});
     exec(&mut h, "mask.add", radial.clone());
     exec(&mut h, "mask.update", json!({"id": 1, "shape": object(Point::new(0.6, 0.5))}));
@@ -461,7 +461,7 @@ fn the_object_tool_adds_no_click_on_the_selected_masks_own_pin() {
     h.app.session.segmenter.dir = Some(dir.clone());
     h.app.session.segmenter.mirrors_file = Some(dir.join("none.txt"));
     exec(&mut h, "mask.add", json!({"kind": "radial", "center": [0.5, 0.5], "rx": 0.1, "ry": 0.1}));
-    let object = MaskShape::Object { hint: vec![Point::new(0.6, 0.5)], exclude: vec![], seg: None, detail: vec![], edge: 0.0 };
+    let object = MaskShape::Object { hint: vec![Point::new(0.6, 0.5)], exclude: vec![], seg: None, detail: vec![], edge: 0.0, matte: vec![], matting: false };
     exec(&mut h, "mask.update", json!({"id": 1, "shape": object}));
     assert_eq!(h.app.session.active_mask, Some(1));
     exec(&mut h, "view.toolOverlay", json!({"mode": "always"}));

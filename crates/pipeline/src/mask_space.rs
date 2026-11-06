@@ -165,11 +165,11 @@ fn remap(m: &mut Mask, fwd: &dyn Fn(Point) -> Point, back: &dyn Fn(Point) -> Poi
                     s.points.iter_mut().for_each(|p| *p = fwd(*p));
                 }
             }
-            MaskShape::Object { hint, exclude, seg, detail, .. } => {
+            MaskShape::Object { hint, exclude, seg, detail, matte, .. } => {
                 hint.iter_mut().chain(exclude.iter_mut()).for_each(|p| *p = fwd(*p));
-                remap_segs(seg, detail, fwd, back);
+                remap_segs(seg, detail, matte, fwd, back);
             }
-            MaskShape::Prompt { seg, detail, .. } => remap_segs(seg, detail, fwd, back),
+            MaskShape::Prompt { seg, detail, matte, .. } => remap_segs(seg, detail, matte, fwd, back),
             // computed from the photo at each render (its mattes follow the warp), or colours,
             // tones and depths, which have no place (a colour range's samples are colours)
             MaskShape::Subject
@@ -187,11 +187,18 @@ fn remap(m: &mut Mask, fwd: &dyn Fn(Point) -> Point, back: &dyn Fn(Point) -> Poi
 /// A stored selection and its zoomed-in passes, resampled onto the new frame. Where a pass's new
 /// box reaches past what it covered, it takes the whole-photo selection there (what the render
 /// showed), not a copy of its own edge.
-fn remap_segs(seg: &mut Option<SegMask>, detail: &mut [SegMask], fwd: &dyn Fn(Point) -> Point, back: &dyn Fn(Point) -> Point) {
+fn remap_segs(seg: &mut Option<SegMask>, detail: &mut [SegMask], matte: &mut [SegMask], fwd: &dyn Fn(Point) -> Point, back: &dyn Fn(Point) -> Point) {
     let coarse = seg.as_ref().and_then(SegGrid::new);
     for d in detail.iter_mut() {
         if let Some(m) = moved(d, fwd, back, coarse.as_ref()) {
             *d = m;
+        }
+    }
+    // (a matte tile that reaches past what it covered selects nothing there: it is only drawn
+    // where it covers, and the selection is a tile's known background at its borders)
+    for t in matte.iter_mut() {
+        if let Some(m) = moved(t, fwd, back, None) {
+            *t = m;
         }
     }
     if let Some(s) = seg.as_ref()
@@ -276,7 +283,7 @@ mod tests {
     }
 
     fn object_at(p: Point) -> MaskShape {
-        MaskShape::Object { hint: vec![p], exclude: Vec::new(), seg: Some(seg_at(p)), detail: Vec::new(), edge: 0.0 }
+        MaskShape::Object { hint: vec![p], exclude: Vec::new(), seg: Some(seg_at(p)), detail: Vec::new(), edge: 0.0, matte: vec![], matting: false }
     }
 
     /// The centre of what `s` selects (sampled on a fine grid).
@@ -359,6 +366,8 @@ mod tests {
             seg: Some(SegMask { side: 1024, data: "not base64".into(), rect: Some([f64::NAN, 0.0, 2.0, -1.0]), grid: None }),
             detail: vec![SegMask { side: 0, data: String::new(), rect: None, grid: None }],
             edge: 0.0,
+            matte: vec![],
+            matting: false,
         }));
         m.on_photo = false;
         let mut s = DevelopSettings::default();
@@ -432,7 +441,7 @@ mod tests {
             let detail = SegMask::from_logits_in(SIDE, &[8.0; SIDE * SIDE], [0.4, 0.4, 0.6, 0.6]);
             let coarse = SegMask::from_logits(SIDE, &[whole; SIDE * SIDE]);
             let mut m =
-                mask(MaskShape::Object { hint: vec![Point::new(0.5, 0.5)], exclude: Vec::new(), seg: Some(coarse), detail: vec![detail], edge: 0.0 });
+                mask(MaskShape::Object { hint: vec![Point::new(0.5, 0.5)], exclude: Vec::new(), seg: Some(coarse), detail: vec![detail], edge: 0.0, matte: vec![], matting: false });
             m.on_photo = false;
             attach(&mut m, &frame);
             let MaskShape::Object { detail, .. } = &m.components[0].shape else { panic!() };
