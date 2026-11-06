@@ -646,7 +646,9 @@ pub fn specs() -> Vec<CommandSpec> {
                 // (the pass keeps its result only while matting is on)
                 masks_edit(s, c, "Matte Edges", |masks, _| {
                     let i = find(masks, mid, c)?;
-                    if let Some(MaskShape::Object { matting, .. } | MaskShape::Prompt { matting, .. }) = masks[i].components.get_mut(k).map(|x| &mut x.shape) {
+                    if let Some(MaskShape::Object { matting, .. } | MaskShape::Prompt { matting, .. }) =
+                        masks[i].components.get_mut(k).map(|x| &mut x.shape)
+                    {
                         *matting = true;
                     }
                     Ok(())

@@ -522,7 +522,11 @@ fn a_matte_outcome_for_a_changed_mask_is_dropped() {
     s.segmenter.results.0.send(worker::Outcome { tag: t, result: Err("it broke".into()), matte: vec![], superseded: false, notice: None }).unwrap();
     assert_eq!(s.segment_poll().messages, vec!["it broke".to_string()]);
     let t = tag(&s);
-    s.segmenter.results.0.send(worker::Outcome { tag: t, result: Err(worker::MATTE_CANCELLED.into()), matte: vec![], superseded: false, notice: None }).unwrap();
+    s.segmenter
+        .results
+        .0
+        .send(worker::Outcome { tag: t, result: Err(worker::MATTE_CANCELLED.into()), matte: vec![], superseded: false, notice: None })
+        .unwrap();
     assert!(s.segment_poll().messages.is_empty());
 }
 
@@ -576,7 +580,8 @@ fn a_detail_outcome_ignores_the_matte_and_clears_it() {
 #[cfg(feature = "sam")]
 #[test]
 fn matting_with_the_real_model_runs_and_cancels_between_tiles() {
-    let Some(dir) = std::env::var_os("LIGHTCRAFT_VITMATTE_DIR").map(std::path::PathBuf::from).filter(|d| lightcraft_segment::is_matte_model_dir(d)) else {
+    let Some(dir) = std::env::var_os("LIGHTCRAFT_VITMATTE_DIR").map(std::path::PathBuf::from).filter(|d| lightcraft_segment::is_matte_model_dir(d))
+    else {
         lightcraft_testkit::skip!(Model, "LIGHTCRAFT_VITMATTE_DIR is not set");
         return;
     };

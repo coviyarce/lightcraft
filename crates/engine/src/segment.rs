@@ -590,7 +590,12 @@ impl Session {
     /// (from a source sharp enough for it) filling `edge × edge`. Also the photo's file when it is
     /// missing from disk, and the key of the uncropped look.
     #[cfg(feature = "sam")]
-    fn segment_render(&mut self, id: PhotoId, region: Option<[f64; 4]>, edge: usize) -> Result<(u64, crate::media::RenderJob, Option<String>), String> {
+    fn segment_render(
+        &mut self,
+        id: PhotoId,
+        region: Option<[f64; 4]>,
+        edge: usize,
+    ) -> Result<(u64, crate::media::RenderJob, Option<String>), String> {
         // old masks go onto the photo first: the selection that comes back is in its coordinates
         if let Some(cur) = self.develop_of(id).filter(|d| d.masks.iter().any(|m| !m.on_photo)) {
             let mut on = (*cur).clone();
@@ -876,9 +881,11 @@ impl Session {
     /// the matting model is there (errors are logged; a missing model is not worth a message).
     pub(crate) fn matte_if_on(&mut self, photo: PhotoId, mask: u32, comp: usize) {
         let on = self.develop_of(photo).is_some_and(|d| {
-            d.masks.iter().find(|m| m.id == mask).and_then(|m| m.components.get(comp)).is_some_and(|c| {
-                matches!(c.shape, MaskShape::Object { matting: true, .. } | MaskShape::Prompt { matting: true, .. })
-            })
+            d.masks
+                .iter()
+                .find(|m| m.id == mask)
+                .and_then(|m| m.components.get(comp))
+                .is_some_and(|c| matches!(c.shape, MaskShape::Object { matting: true, .. } | MaskShape::Prompt { matting: true, .. }))
         });
         if !on || !self.segmenter.matte_installed() {
             return;

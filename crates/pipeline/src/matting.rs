@@ -216,7 +216,18 @@ impl Plan {
         let radius = ((BAND_CELLS * self.cell_px * scale).round() as usize).clamp(TRIMAP_RADIUS.0, TRIMAP_RADIUS.1);
         let fg = erode_keeping(&fg, w, h, radius);
         let bg = erode_keeping(&bg, w, h, radius);
-        fg.iter().zip(&bg).map(|(f, b)| if *f { 255 } else if *b { 0 } else { 128 }).collect()
+        fg.iter()
+            .zip(&bg)
+            .map(|(f, b)| {
+                if *f {
+                    255
+                } else if *b {
+                    0
+                } else {
+                    128
+                }
+            })
+            .collect()
     }
 }
 
@@ -435,11 +446,8 @@ pub fn feather_overlaps(tiles: &[Tile], alphas: &[Vec<f32>]) -> Vec<Vec<f32>> {
         let Some(dst) = out.get_mut(i) else { continue };
         for ly in 0..ti.px.1 {
             let gy = ti.origin.1 + ly;
-            let rows: Vec<usize> = others
-                .iter()
-                .copied()
-                .filter(|&j| valid(j).is_some_and(|(tj, _)| gy >= tj.origin.1 && gy < tj.origin.1 + tj.px.1))
-                .collect();
+            let rows: Vec<usize> =
+                others.iter().copied().filter(|&j| valid(j).is_some_and(|(tj, _)| gy >= tj.origin.1 && gy < tj.origin.1 + tj.px.1)).collect();
             if rows.is_empty() {
                 continue;
             }
@@ -539,7 +547,10 @@ mod tests {
         for photo in [(0, 0), (10, 10), (4000, 0), (usize::MAX, usize::MAX), (1 << 20, 100)] {
             assert!(band_tiles(Some(&ok), &[], photo).is_empty(), "{photo:?}");
         }
-        assert!(Plan::new(Some(&ok), &[], (4000, 3000)).is_some_and(|p| p.trimap(&Tile { rect: [f64::NAN; 4], origin: (0, 0), px: (8, 8) }, 8, 8).is_empty()));
+        assert!(
+            Plan::new(Some(&ok), &[], (4000, 3000))
+                .is_some_and(|p| p.trimap(&Tile { rect: [f64::NAN; 4], origin: (0, 0), px: (8, 8) }, 8, 8).is_empty())
+        );
         assert!(trimap(Some(&ok), &[], (4000, 3000), &Tile { rect: [0.0, 0.0, 1.0, 1.0], origin: (0, 0), px: (8, 8) }, 0, 5).is_empty());
     }
 
