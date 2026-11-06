@@ -234,6 +234,13 @@ sequence in a folder, or an AV1 video (no audio). It runs in the background and 
 `cmd_slideshow_exportStatus` gives the result (`pages`, `files`, or `frames` / `samples` / `seconds` for video) or the
 error. With `wait: true` the call blocks and replies with the result.
 
+### AI mask edge matting
+
+`mask.matte`, `mask.refineMatte` and `segment.model.download {model: "vitmatte"}` are ordinary command tools
+like the rest. The headless server waits for a matting pass to finish before it answers (about a second per
+512 px tile on a CPU, up to 24 tiles), and `activity.cancel` from another call stops it between tiles. See
+[Control protocol](control-protocol.md) for the replies.
+
 ### Preview-only raws after an update
 
 A raw LightCraft couldn't decode when it was imported is shown from its embedded preview

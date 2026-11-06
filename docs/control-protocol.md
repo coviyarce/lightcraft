@@ -175,6 +175,17 @@ painting on the current mask. `{"new": true}` creates a separate brush mask; `{"
 paint mode with the overlay visible. Brush Erase (or Alt while painting) removes strokes' coverage
 within that brush component; it is distinct from subtracting the component from the whole mask.
 
+AI mask edges. `mask.refineDetail {id?, component?}` answers `{started, reason?}`; `reason` says why nothing
+started (for example, the selection covers more than 40 % of the photo, which gets no zoomed-in pass).
+`mask.matte {id?, component?, enabled?}` switches ViTMatte-S alpha matting of an Object or Describe
+selection's edge band on or off (on by default for the call) and `mask.refineMatte {id?, component?}` runs it
+now; both answer `{started, tiles?, reason?}`, run in the background in the app and wait for the result in
+the CLI and MCP, and fail with a missing-model error until the ViTMatte-S model is installed. That model is
+fetched like SAM 3: `segment.model.download {model: "vitmatte", acknowledged: true}`, watched with
+`segment.model.status` (its `matte` block) and stopped with `segment.model.cancel {model: "vitmatte"}`; without
+`model` these three keep addressing SAM 3. A running pass shows in `activity.list` as `matte` (one step per
+tile) and `activity.cancel` stops it between tiles.
+
 ### When the library can't be saved
 
 With a persistent library, every command that changes something is written to the catalog journal (fsynced) before
