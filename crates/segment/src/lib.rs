@@ -45,6 +45,10 @@ mod tracker;
 #[cfg(not(target_arch = "wasm32"))]
 mod vit;
 #[cfg(not(target_arch = "wasm32"))]
+mod vitdet;
+#[cfg(not(target_arch = "wasm32"))]
+mod vitmatte;
+#[cfg(not(target_arch = "wasm32"))]
 mod weights;
 
 use std::path::{Path, PathBuf};
@@ -58,11 +62,15 @@ use candle_nn::VarBuilder;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use tracker::Click;
+#[cfg(not(target_arch = "wasm32"))]
+pub use vitmatte::{MATTE_DIVISOR, MATTE_MAX_SIDE, MATTE_WEIGHTS_FILE, ViTMatte, is_matte_model_dir};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("SAM 3 model: {0}")]
     Model(String),
+    #[error("ViTMatte model: {0}")]
+    Matte(String),
     #[error("SAM 3 model files not found in {0} (expected model.safetensors, vocab.json, merges.txt)")]
     Missing(PathBuf),
     #[cfg(not(target_arch = "wasm32"))]
