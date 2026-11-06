@@ -19,6 +19,8 @@
 mod download;
 #[cfg(feature = "sam")]
 mod worker;
+#[cfg(all(test, feature = "sam"))]
+pub(crate) use worker::MATTE_CANCELLED;
 
 use std::path::PathBuf;
 
@@ -220,6 +222,12 @@ impl Segmenter {
         return self.worker.detail() > 0;
         #[cfg(not(feature = "sam"))]
         false
+    }
+
+    /// Hand the session a finished request, as the worker would (tests of how results are applied).
+    #[cfg(all(test, feature = "sam"))]
+    pub(crate) fn inject(&self, tag: Tag, result: Result<Option<SegMask>, String>, matte: Vec<SegMask>) {
+        let _ = self.results.0.send(worker::Outcome { tag, result, matte, superseded: false, notice: None });
     }
 
     /// Whether an edge-matting pass is queued or running.

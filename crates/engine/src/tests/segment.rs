@@ -482,7 +482,7 @@ fn a_damaged_matte_model_is_an_error_not_a_crash() {
 #[cfg(feature = "sam")]
 #[test]
 fn a_matte_outcome_for_a_changed_mask_is_dropped() {
-    use crate::segment::{Tag, worker};
+    use crate::segment::{MATTE_CANCELLED, Tag};
     use lightcraft_develop::{MaskShape, SegMask};
     let mut s = Session::with_demo();
     let (id, mid) = stored_mask(&mut s);
@@ -495,7 +495,7 @@ fn a_matte_outcome_for_a_changed_mask_is_dropped() {
     };
     let send = |s: &mut Session, shape: MaskShape, matte: Vec<SegMask>| {
         let tag = Tag::Matte { photo: id, mask: mid, comp: 0, shape: crate::segment::strip_matte(shape) };
-        s.segmenter.results.0.send(worker::Outcome { tag, result: Ok(None), matte, superseded: false, notice: None }).unwrap();
+        s.segmenter.inject(tag, Ok(None), matte);
         s.segment_poll()
     };
     // matting off: nothing is kept
@@ -519,14 +519,10 @@ fn a_matte_outcome_for_a_changed_mask_is_dropped() {
     // a failure comes back as a message, a cancel is silent
     let tag = |s: &Session| Tag::Matte { photo: id, mask: mid, comp: 0, shape: crate::segment::strip_matte(shape_of(s)) };
     let t = tag(&s);
-    s.segmenter.results.0.send(worker::Outcome { tag: t, result: Err("it broke".into()), matte: vec![], superseded: false, notice: None }).unwrap();
+    s.segmenter.inject(t, Err("it broke".into()), vec![]);
     assert_eq!(s.segment_poll().messages, vec!["it broke".to_string()]);
     let t = tag(&s);
-    s.segmenter
-        .results
-        .0
-        .send(worker::Outcome { tag: t, result: Err(worker::MATTE_CANCELLED.into()), matte: vec![], superseded: false, notice: None })
-        .unwrap();
+    s.segmenter.inject(t, Err(MATTE_CANCELLED.into()), vec![]);
     assert!(s.segment_poll().messages.is_empty());
 }
 
@@ -547,7 +543,7 @@ fn switched(s: &Session, id: lightcraft_catalog::PhotoId, mid: u32, on: bool) ->
 #[cfg(feature = "sam")]
 #[test]
 fn a_detail_outcome_ignores_the_matte_and_clears_it() {
-    use crate::segment::{Tag, worker};
+    use crate::segment::{MATTE_CANCELLED, Tag};
     use lightcraft_develop::{MaskShape, SegMask};
     let mut s = Session::with_demo();
     let (id, mid) = stored_mask(&mut s);
@@ -562,7 +558,7 @@ fn a_detail_outcome_ignores_the_matte_and_clears_it() {
     s.set_develop(id, d, "test").unwrap();
     let patch = SegMask::from_logits_in(8, &[4.0; 64], [0.2, 0.2, 0.8, 0.8]);
     let tag = Tag::Detail { photo: id, mask: mid, comp: 0, shape: crate::segment::strip_detail(started) };
-    s.segmenter.results.0.send(worker::Outcome { tag, result: Ok(Some(patch)), matte: vec![], superseded: false, notice: None }).unwrap();
+    s.segmenter.inject(tag, Ok(Some(patch)), vec![]);
     let polled = s.segment_poll();
     assert!(polled.changed, "the detail pass was rejected");
     match &s.develop_of(id).unwrap().masks[0].components[0].shape {

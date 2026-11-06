@@ -555,6 +555,7 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job, placement: Placeme
             Placement::Gpu => Err(Failure::Model("a test error on the GPU".into())),
             Placement::Cpu => Ok(None),
         },
+        Kind::Matte { .. } => Err("a matting request reached the SAM 3 path".into()),
         Kind::Detail { prompt, region } => {
             let input = render(job)?;
             let m = model(state, shared, &job.dir, placement)?;
