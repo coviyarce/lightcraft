@@ -40,6 +40,7 @@ pub mod local_tone;
 pub mod lut;
 pub mod mask_space;
 pub mod masks;
+pub mod matting;
 pub mod nrc_joint;
 #[cfg(test)]
 mod nrc_joint_reference;

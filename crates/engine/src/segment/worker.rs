@@ -24,12 +24,14 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use lightcraft_develop::SegMask;
+use lightcraft_pipeline::matting::{self, Tile};
 use lightcraft_segment::{
-    Encoded, Sam3,
+    Encoded, Sam3, ViTMatte,
     remote::{self, Operation, Request, text_logits},
 };
 
 use super::{Input, Prompt, Tag};
+use crate::activity::{TaskGuard, TaskHandle};
 use crate::media::RenderJob;
 
 /// Unload the model after this long without a request.
@@ -47,6 +49,15 @@ pub enum Kind {
         prompt: Prompt,
         region: [f64; 4],
     },
+    /// Alpha matting of the selection's edge band: ViTMatte-S on each tile, one after the other.
+    /// Runs locally even when SAM 3 runs on a remote worker.
+    Matte {
+        /// The ViTMatte-S model folder.
+        dir: PathBuf,
+        tiles: Vec<MatteTile>,
+        /// The activity row: progress, and the cancel flag checked between tiles.
+        task: TaskHandle,
+    },
     /// Panics (tests of the worker's recovery).
     #[cfg(test)]
     Panic,
@@ -57,6 +68,18 @@ pub enum Kind {
         panic: bool,
     },
 }
+
+/// One tile of a matting pass: the photo's pixels (rendered by `render`) and the trimap for them.
+#[derive(Clone)]
+pub struct MatteTile {
+    pub tile: Tile,
+    /// Trimap at `tile.px` (resampled when the render comes out a pixel or two off).
+    pub trimap: Vec<u8>,
+    pub render: RenderJob,
+}
+
+/// The reason a cancelled matting pass ends with.
+pub const MATTE_CANCELLED: &str = "Matting was cancelled";
 
 /// One request.
 pub struct Job {
@@ -71,12 +94,18 @@ pub struct Job {
     pub kind: Kind,
     pub tag: Tag,
     pub reply: mpsc::Sender<Outcome>,
+    /// The request's row in the activity stack, held until the job is done (matting).
+    pub task: Option<TaskGuard>,
+    /// What a matting job produced (taken into its [`Outcome`]).
+    pub tiles_out: Vec<SegMask>,
 }
 
 /// A finished request: the segmentation (`None`: nothing selected / nothing to report).
 pub struct Outcome {
     pub tag: Tag,
     pub result: Result<Option<SegMask>, String>,
+    /// The matte tiles of a matting pass (empty for every other request).
+    pub matte: Vec<SegMask>,
     /// A newer request for the same selection came in; this one was skipped.
     pub superseded: bool,
     /// Something the user should know besides the result ([`GPU_FAILED`]).
@@ -152,10 +181,21 @@ pub struct Shared {
     pub pending: AtomicUsize,
     /// Detail passes queued or running.
     pub detail: AtomicUsize,
+    /// Matting passes queued or running.
+    pub matte: AtomicUsize,
     /// The model is in memory.
     pub loaded: AtomicBool,
     /// Loading the model or encoding a photo right now (the slow parts).
     pub encoding: AtomicBool,
+}
+
+/// The counter a request of this kind is counted under.
+fn counter_of<'a>(shared: &'a Shared, kind: &Kind) -> &'a AtomicUsize {
+    match kind {
+        Kind::Detail { .. } => &shared.detail,
+        Kind::Matte { .. } => &shared.matte,
+        _ => &shared.pending,
+    }
 }
 
 /// Decrements a counter when dropped (also when unwinding).
@@ -194,7 +234,7 @@ pub struct Worker {
 
 impl Worker {
     fn counter(&self, job: &Job) -> &AtomicUsize {
-        if matches!(job.kind, Kind::Detail { .. }) { &self.shared.detail } else { &self.shared.pending }
+        counter_of(&self.shared, &job.kind)
     }
 
     /// Whether the thread has ended (it never should); its counters are then meaningless.
@@ -208,6 +248,10 @@ impl Worker {
 
     pub fn detail(&self) -> usize {
         if self.dead() { 0 } else { self.shared.detail.load(Ordering::SeqCst) }
+    }
+
+    pub fn matte(&self) -> usize {
+        if self.dead() { 0 } else { self.shared.matte.load(Ordering::SeqCst) }
     }
 
     pub fn encoding(&self) -> bool {
@@ -256,6 +300,8 @@ impl Worker {
 struct State {
     model: Option<(PathBuf, Sam3)>,
     cache: Option<(u64, Encoded)>,
+    /// ViTMatte-S and the folder it came from.
+    matte: Option<(PathBuf, ViTMatte)>,
     remote: Option<remote::Client>,
 }
 
@@ -265,6 +311,7 @@ fn supersedes(later: &Job, job: &Job) -> bool {
         (Tag::Prepare, Tag::Prepare) => later.key == job.key,
         (Tag::Clicks { photo: a, mask: am, comp: ac, .. }, Tag::Clicks { photo: b, mask: bm, comp: bc, .. }) => (a, am, ac) == (b, bm, bc),
         (Tag::Detail { photo: a, mask: am, comp: ac, .. }, Tag::Detail { photo: b, mask: bm, comp: bc, .. }) => (a, am, ac) == (b, bm, bc),
+        (Tag::Matte { photo: a, mask: am, comp: ac, .. }, Tag::Matte { photo: b, mask: bm, comp: bc, .. }) => (a, am, ac) == (b, bm, bc),
         _ => false,
     }
 }
@@ -277,7 +324,7 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration, mut placement:
             match rx.recv_timeout(idle) {
                 Ok(j) => queue.push_back(j),
                 Err(RecvTimeoutError::Timeout) => {
-                    if state.model.is_some() || state.remote.is_some() {
+                    if state.model.is_some() || state.remote.is_some() || state.matte.is_some() {
                         state = State::default();
                         shared.loaded.store(false, Ordering::SeqCst);
                         log::info!("SAM 3 unloaded after {} minutes without use", idle.as_secs() / 60);
@@ -291,13 +338,14 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration, mut placement:
             queue.push_back(j);
         }
         let Some(mut job) = queue.pop_front() else { continue };
-        let is_detail = matches!(job.kind, Kind::Detail { .. });
+        let is_detail = matches!(job.kind, Kind::Detail { .. } | Kind::Matte { .. });
         // counts the job as pending until just before its reply goes out: a caller woken by the
         // reply must not still see the worker busy with it
-        let done = Done(if is_detail { &shared.detail } else { &shared.pending });
+        let done = Done(counter_of(shared, &job.kind));
         if queue.iter().any(|later| supersedes(later, &job)) {
             drop(done);
-            let _ = job.reply.send(Outcome { tag: job.tag, result: Ok(None), superseded: true, notice: None });
+            job.task = None;
+            let _ = job.reply.send(Outcome { tag: job.tag, result: Ok(None), matte: Vec::new(), superseded: true, notice: None });
             continue;
         }
         // what a retry on the CPU needs (running the job takes them)
@@ -313,6 +361,7 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration, mut placement:
             // the model there and try once on the CPU
             log::warn!("SAM 3 failed on the GPU ({why}); trying the CPU");
             state = State::default();
+            job.tiles_out.clear();
             (job.kind, job.render) = (kind, render);
             match attempt(&mut state, shared, &mut job, Placement::Cpu) {
                 Ok(r) => {
@@ -329,12 +378,14 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration, mut placement:
             }
         }
         let result = result.map_err(Failure::message);
+        let matte = if result.is_ok() { std::mem::take(&mut job.tiles_out) } else { Vec::new() };
         if result.is_err() && !is_detail {
             state.cache = None;
         }
         shared.loaded.store(state.model.is_some() || state.remote.is_some(), Ordering::SeqCst);
         drop(done);
-        let _ = job.reply.send(Outcome { tag: job.tag, result, superseded: false, notice });
+        job.task = None;
+        let _ = job.reply.send(Outcome { tag: job.tag, result, matte, superseded: false, notice });
     }
 }
 
@@ -373,11 +424,17 @@ fn model<'a>(state: &'a mut State, shared: &Shared, dir: &std::path::Path, place
 
 /// Render the model input.
 fn render(job: &mut Job) -> Result<Input, String> {
-    let r = job.render.take().ok_or("the photo is not available")?.run();
+    let render = job.render.take().ok_or("the photo is not available")?;
+    render_with(render, job.missing.as_deref())
+}
+
+/// Run `render`; `missing` is the photo's file when it is gone from disk (for the error).
+fn render_with(render: RenderJob, missing: Option<&str>) -> Result<Input, String> {
+    let r = render.run();
     let img = match r.rendered {
         Ok(r) => r.image,
         Err(e) => {
-            return Err(match &job.missing {
+            return Err(match missing {
                 Some(path) => format!(
                     "This photo's file is missing (moved or deleted), so it can't be analyzed for AI masks: {path}. Library ▸ Find Missing Photos can relink it."
                 ),
@@ -421,6 +478,7 @@ fn remote_job(state: &mut State, shared: &Shared, job: &mut Job, endpoint: &str)
         Kind::Prepare => Operation::Prepare,
         Kind::Text(text) => Operation::Text(text),
         Kind::Clicks(clicks) => Operation::Clicks(clicks.iter().map(|c| [c.x, c.y, if c.positive { 1.0 } else { 0.0 }]).collect()),
+        Kind::Matte { .. } => return Err("matting runs on this computer".into()),
         Kind::Detail { prompt, region: r } => {
             region = Some(r);
             let (rw, rh) = (r[2] - r[0], r[3] - r[1]);
@@ -458,6 +516,13 @@ fn remote_job(state: &mut State, shared: &Shared, job: &mut Job, endpoint: &str)
 }
 
 fn run_job(state: &mut State, shared: &Shared, job: &mut Job, placement: Placement) -> Result<Option<SegMask>, Failure> {
+    // matting is local whatever SAM 3 does
+    let kind = std::mem::replace(&mut job.kind, Kind::Prepare);
+    if let Kind::Matte { dir, tiles, task } = kind {
+        job.tiles_out = run_matte(state, &dir, tiles, &task, job.missing.as_deref(), placement)?;
+        return Ok(None);
+    }
+    job.kind = kind;
     if let Some(endpoint) = remote::configured() {
         let result = remote_job(state, shared, job, &endpoint);
         if result.is_err() {
@@ -520,6 +585,56 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job, placement: Placeme
     }
 }
 
+/// ViTMatte-S for `dir`, loading it on `placement` when needed.
+fn matte_model<'a>(state: &'a mut State, dir: &std::path::Path, placement: Placement) -> Result<&'a ViTMatte, Failure> {
+    if state.matte.as_ref().is_none_or(|(d, _)| d != dir) {
+        state.matte = None;
+        let t = web_time::Instant::now();
+        let m = ViTMatte::load(dir, placement == Placement::Gpu)?;
+        log::info!("ViTMatte-S loaded in {:?} ({})", t.elapsed(), if m.device().is_cpu() { "CPU" } else { "GPU" });
+        state.matte = Some((dir.to_path_buf(), m));
+    }
+    state.matte.as_ref().map(|(_, m)| m).ok_or_else(|| "the matting model did not load".into())
+}
+
+/// Matte every tile in turn (checking for a cancel before each), blend the overlaps, and store the
+/// tiles as alpha.
+fn run_matte(
+    state: &mut State,
+    dir: &std::path::Path,
+    tiles: Vec<MatteTile>,
+    task: &TaskHandle,
+    missing: Option<&str>,
+    placement: Placement,
+) -> Result<Vec<SegMask>, Failure> {
+    let total = tiles.len() as u64;
+    task.progress(0, total);
+    matte_model(state, dir, placement)?;
+    let t0 = web_time::Instant::now();
+    let mut placed: Vec<Tile> = Vec::new();
+    let mut alphas: Vec<Vec<f32>> = Vec::new();
+    for (i, t) in tiles.into_iter().enumerate() {
+        if task.is_cancelled() {
+            return Err(Failure::Other(MATTE_CANCELLED.into()));
+        }
+        let side = t.tile.px.0;
+        let input = render_with(t.render, missing)?;
+        let trimap = if (input.w, input.h) == t.tile.px { t.trimap } else { matting::resize_trimap(&t.trimap, side, t.tile.px.1, input.w, input.h) };
+        let model = matte_model(state, dir, placement)?;
+        let alpha = model.matte(&input.rgb, &trimap, input.w, input.h)?;
+        let alpha = matting::resize_alpha(&alpha, input.w, input.h, side, t.tile.px.1);
+        if alpha.is_empty() {
+            return Err("the matting model returned an unusable result".into());
+        }
+        placed.push(t.tile);
+        alphas.push(alpha);
+        task.progress(i as u64 + 1, total);
+    }
+    log::info!("ViTMatte-S matted {} tiles in {:?}", placed.len(), t0.elapsed());
+    let blended = matting::feather_overlaps(&placed, &alphas);
+    Ok(placed.iter().zip(&blended).map(|(t, a)| SegMask::from_alpha_in(t.px.0, a, t.rect)).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,7 +642,7 @@ mod tests {
     fn job(tag: Tag, reply: &mpsc::Sender<Outcome>) -> Job {
         // an empty folder: loading fails with an error (no model files)
         let dir = std::env::temp_dir().join(format!("lc-sam3-worker-none-{}", std::process::id()));
-        Job { dir, key: 1, render: None, missing: None, kind: Kind::Prepare, tag, reply: reply.clone() }
+        Job { dir, key: 1, render: None, missing: None, kind: Kind::Prepare, tag, reply: reply.clone(), task: None, tiles_out: Vec::new() }
     }
 
     #[test]

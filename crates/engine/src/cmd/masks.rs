@@ -151,6 +151,44 @@ fn queue_later(s: &mut Session, later: Later, mask: u32, comp: usize, mut out: V
     Ok(out)
 }
 
+/// The photo, mask and component an AI command is about: `component` or the mask's last Object or
+/// Describe selection.
+fn ai_target(s: &Session, p: &Value, c: &str) -> Result<(lightcraft_catalog::PhotoId, u32, usize)> {
+    let id = s.active().ok_or_else(|| bad(c, "no active photo"))?;
+    let mid = mask_id(p, s.active_mask, c)?;
+    let d = s.develop_of(id).unwrap_or_default();
+    let m = d.masks.iter().find(|m| m.id == mid).ok_or_else(|| bad(c, format!("no mask {mid}")))?;
+    let k = match optional_index(p, "component", c)? {
+        Some(k) => k,
+        None => m
+            .components
+            .iter()
+            .rposition(|x| matches!(x.shape, MaskShape::Object { .. } | MaskShape::Prompt { .. }))
+            .ok_or_else(|| bad(c, "the mask has no Object or Describe selection"))?,
+    };
+    Ok((id, mid, k))
+}
+
+/// Whether `model` names the matting model (`"vitmatte"`) rather than SAM 3 (`"sam3"`, the default).
+fn ai_model_param(p: &Value, c: &str) -> Result<bool> {
+    match p.get("model").map(|v| v.as_str()) {
+        None | Some(Some("sam3")) => Ok(false),
+        Some(Some("vitmatte")) => Ok(true),
+        _ => Err(bad(c, "model must be \"sam3\" or \"vitmatte\"")),
+    }
+}
+
+/// Add what a matting request did to `out`.
+fn matte_result(out: &mut Value, r: std::result::Result<usize, &'static str>) {
+    match r {
+        Ok(tiles) => {
+            out["started"] = json!(true);
+            out["tiles"] = json!(tiles);
+        }
+        Err(why) => out["reason"] = json!(why),
+    }
+}
+
 /// AI mask failures are shown as they are (not as "invalid parameters").
 fn ai_err(msg: impl Into<String>) -> crate::EngineError {
     crate::EngineError::Other(msg.into())
@@ -539,6 +577,8 @@ pub fn specs() -> Vec<CommandSpec> {
                     }
                     Ok(())
                 })?;
+                // (waiting mode: no detail pass follows by itself, so matte now)
+                s.matte_if_on(id, mid, k);
                 Ok(out)
             }
         ),
@@ -547,24 +587,73 @@ pub fn specs() -> Vec<CommandSpec> {
             "Refine AI Mask Detail",
             [],
             None,
-            "{id?: maskId, component?} — a zoomed-in SAM 3 pass over an Object/Describe selection (default: the mask's last one): the photo around it is analyzed again at a higher resolution, in the background; the mask updates when it's done → {started}",
+            "{id?: maskId, component?} — a zoomed-in SAM 3 pass over an Object/Describe selection (default: the mask's last one): the photo around it is analyzed again at a higher resolution, in the background; the mask updates when it's done → {started, reason?} (reason: why nothing started, e.g. the selection covers more than 40 % of the photo)",
             has_active,
             |s, p| {
                 let c = "mask.refineDetail";
-                let id = s.active().ok_or_else(|| bad(c, "no active photo"))?;
-                let mid = mask_id(p, s.active_mask, c)?;
-                let d = s.develop_of(id).unwrap_or_default();
-                let m = d.masks.iter().find(|m| m.id == mid).ok_or_else(|| bad(c, format!("no mask {mid}")))?;
-                let k = match optional_index(p, "component", c)? {
-                    Some(k) => k,
-                    None => m
-                        .components
-                        .iter()
-                        .rposition(|x| matches!(x.shape, MaskShape::Object { .. } | MaskShape::Prompt { .. }))
-                        .ok_or_else(|| bad(c, "the mask has no Object or Describe selection"))?,
-                };
-                let started = segment(s, |s| s.segment_detail(id, mid, k))?;
-                Ok(json!({"started": started}))
+                let (id, mid, k) = ai_target(s, p, c)?;
+                match segment(s, |s| s.segment_detail_why(id, mid, k))? {
+                    Ok(()) => Ok(json!({"started": true})),
+                    Err(why) => Ok(json!({"started": false, "reason": why})),
+                }
+            }
+        ),
+        cmd!(
+            "mask.matte",
+            "Matte AI Mask Edges",
+            [],
+            None,
+            "{id?: maskId, component?, enabled?: bool (default true)} — switch edge matting on an Object/Describe selection (default: the mask's last one) on or off. On: ViTMatte-S computes soft per-pixel coverage along the selection's edge (hair, fabric), in the background, and keeps it up to date when the selection changes; needs the ViTMatte-S model (segment.model.download {model: \"vitmatte\"}). Off: the stored matte is dropped → {enabled, started, tiles?, reason?}",
+            has_active,
+            |s, p| {
+                let c = "mask.matte";
+                let enabled = bool_or(p, "enabled", true);
+                let (id, mid, k) = ai_target(s, p, c)?;
+                if enabled {
+                    s.segmenter.require_matte_model()?;
+                }
+                masks_edit(s, c, "Matte Edges", |masks, _| {
+                    let i = find(masks, mid, c)?;
+                    match masks[i].components.get_mut(k).map(|x| &mut x.shape) {
+                        Some(MaskShape::Object { matting, matte, .. } | MaskShape::Prompt { matting, matte, .. }) => {
+                            *matting = enabled;
+                            if !enabled {
+                                matte.clear();
+                            }
+                            Ok(())
+                        }
+                        _ => Err(bad(c, "the component is not an Object or Describe selection")),
+                    }
+                })?;
+                let mut out = json!({"enabled": enabled, "started": false});
+                if enabled {
+                    matte_result(&mut out, s.segment_matte(id, mid, k).map_err(ai_err)?);
+                }
+                Ok(out)
+            }
+        ),
+        cmd!(
+            "mask.refineMatte",
+            "Refine AI Mask Edges (Matting)",
+            [],
+            None,
+            "{id?: maskId, component?} — run ViTMatte-S edge matting now on an Object/Describe selection (default: the mask's last one; it switches matting on for it) and store the result with the mask. In the background in the app; the CLI and MCP wait for it → {started, tiles?, reason?}",
+            has_active,
+            |s, p| {
+                let c = "mask.refineMatte";
+                let (id, mid, k) = ai_target(s, p, c)?;
+                s.segmenter.require_matte_model()?;
+                // (the pass keeps its result only while matting is on)
+                masks_edit(s, c, "Matte Edges", |masks, _| {
+                    let i = find(masks, mid, c)?;
+                    if let Some(MaskShape::Object { matting, .. } | MaskShape::Prompt { matting, .. }) = masks[i].components.get_mut(k).map(|x| &mut x.shape) {
+                        *matting = true;
+                    }
+                    Ok(())
+                })?;
+                let mut out = json!({"started": false});
+                matte_result(&mut out, s.segment_matte(id, mid, k).map_err(ai_err)?);
+                Ok(out)
             }
         ),
         cmd!(
@@ -586,7 +675,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "AI Mask Model Status",
             [],
             None,
-            "{} — whether this build has AI masks, whether the SAM 3 model is installed (and where), loaded, busy, and the download's progress → {available, installed, dir, loaded, busy, analyzing, sizeBytes, license, licenseUrl, mirrors, download: {running, done, total, file, error, finished}}",
+            "{} — whether this build has AI masks, whether the SAM 3 model is installed (and where), loaded, busy, and the download's progress; `matte` is the same for the ViTMatte-S edge-matting model → {available, installed, dir, loaded, busy, analyzing, sizeBytes, license, licenseUrl, mirrors, download: {running, done, total, file, error, finished}, matte: {installed, dir, busy, sizeBytes, license, licenseUrl, mirrors, download}}",
             super::always,
             |s, _| {
                 let g = &s.segmenter;
@@ -603,6 +692,16 @@ pub fn specs() -> Vec<CommandSpec> {
                     "licenseUrl": crate::segment::LICENSE_URL,
                     "mirrors": g.mirrors().len(),
                     "download": g.download_status(),
+                    "matte": {
+                        "installed": g.matte_installed(),
+                        "dir": g.matte_dir.as_ref().map(|d| d.display().to_string()),
+                        "busy": g.matte_busy(),
+                        "sizeBytes": crate::segment::MATTE_MODEL_BYTES,
+                        "license": crate::segment::MATTE_LICENSE_NAME,
+                        "licenseUrl": crate::segment::MATTE_LICENSE_URL,
+                        "mirrors": g.matte_mirrors().len(),
+                        "download": g.matte_download_status(),
+                    },
                 }))
             }
         ),
@@ -611,20 +710,27 @@ pub fn specs() -> Vec<CommandSpec> {
             "Download AI Mask Model",
             [],
             None,
-            "{acknowledged: true} — download the SAM 3 model (about 3.4 GB, Meta's SAM License, not LightCraft's) in the background, from the configured mirrors; only after the user agreed to it. Watch segment.model.status; segment.model.cancel stops it (it resumes later) → {started, installed, downloading}",
+            "{acknowledged: true, model?: \"sam3\" (default) | \"vitmatte\"} — download the SAM 3 model (about 3.4 GB, Meta's SAM License, not LightCraft's) or the ViTMatte-S edge-matting model (about 103 MB, Apache-2.0 weights trained on Composition-1k) in the background, from the configured mirrors; only after the user agreed to it. Watch segment.model.status; segment.model.cancel stops it (it resumes later) → {started, installed, downloading}",
             super::always,
             |s, p| {
                 let c = "segment.model.download";
+                let matte = ai_model_param(p, c)?;
                 if p.get("acknowledged").and_then(Value::as_bool) != Some(true) {
+                    let (name, gb, license, url) = if matte {
+                        ("ViTMatte-S", crate::segment::MATTE_MODEL_BYTES as f64 / 1e9, crate::segment::MATTE_LICENSE_NAME, crate::segment::MATTE_LICENSE_URL)
+                    } else {
+                        ("SAM 3", crate::segment::MODEL_BYTES as f64 / 1e9, crate::segment::LICENSE_NAME, crate::segment::LICENSE_URL)
+                    };
                     return Err(bad(
                         c,
                         format!(
-                            "the SAM 3 model is a {:.1} GB download under Meta's {} ({}): pass `acknowledged: true` once the user has agreed to download it",
-                            crate::segment::MODEL_BYTES as f64 / 1e9,
-                            crate::segment::LICENSE_NAME,
-                            crate::segment::LICENSE_URL
+                            "the {name} model is a {gb:.1} GB download under {license} ({url}): pass `acknowledged: true` once the user has agreed to download it"
                         ),
                     ));
+                }
+                if matte {
+                    let started = s.segmenter.start_matte_download(&s.activity).map_err(ai_err)?;
+                    return Ok(json!({"started": started, "installed": s.segmenter.matte_installed(), "downloading": s.segmenter.matte_download_status().running}));
                 }
                 let started = s.segmenter.start_download(&s.activity).map_err(ai_err)?;
                 Ok(json!({"started": started, "installed": s.segmenter.installed(), "downloading": s.segmenter.download_status().running}))
@@ -635,9 +741,12 @@ pub fn specs() -> Vec<CommandSpec> {
             "Cancel AI Mask Model Download",
             [],
             None,
-            "{} — stop the SAM 3 download (what has arrived is kept, and a new download resumes from it) → {cancelled}",
+            "{model?: \"sam3\" (default) | \"vitmatte\"} — stop the model download (what has arrived is kept, and a new download resumes from it) → {cancelled}",
             super::always,
-            |s, _| Ok(json!({"cancelled": s.segmenter.cancel_download()}))
+            |s, p| {
+                let matte = ai_model_param(p, "segment.model.cancel")?;
+                Ok(json!({"cancelled": if matte { s.segmenter.cancel_matte_download() } else { s.segmenter.cancel_download() }}))
+            }
         ),
         cmd!(
             "mask.refine",

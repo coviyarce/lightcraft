@@ -199,6 +199,12 @@ impl ViTMatte {
         Ok(Self { device: device.clone(), backbone, decoder })
     }
 
+    /// [`ViTMatte::load_on`] on the best device ([`crate::best_device`]) when `gpu`, else on the CPU.
+    pub fn load(dir: &Path, gpu: bool) -> Result<Self> {
+        let device = if gpu { crate::best_device() } else { Device::Cpu };
+        Self::load_on(dir, &device)
+    }
+
     pub fn device(&self) -> &Device {
         &self.device
     }

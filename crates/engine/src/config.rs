@@ -131,12 +131,26 @@ fn sam3_dir(var: Option<std::ffi::OsString>, config: Option<PathBuf>) -> Option<
     var.filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| config.map(|d| d.join("models").join("sam3")))
 }
 
+/// Where the ViTMatte-S model (edge matting) is kept: `$LIGHTCRAFT_VITMATTE_DIR` if set, else
+/// `<config>/models/vitmatte-s`.
+pub fn default_matte_dir() -> Option<PathBuf> {
+    matte_dir(std::env::var_os("LIGHTCRAFT_VITMATTE_DIR"), config_dir())
+}
+
+/// [`default_matte_dir`] for a given override and config folder: a non-empty override wins.
+fn matte_dir(var: Option<std::ffi::OsString>, config: Option<PathBuf>) -> Option<PathBuf> {
+    var.filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| config.map(|d| d.join("models").join("vitmatte-s")))
+}
+
 impl Session {
     /// Look for the SAM 3 model in the shared default folder ([`default_sam3_dir`]), and for the user's
-    /// download mirrors in `<config>/models/sam3-mirrors.txt`.
+    /// download mirrors in `<config>/models/sam3-mirrors.txt`; likewise the ViTMatte-S model
+    /// ([`default_matte_dir`], `vitmatte-mirrors.txt`).
     pub fn with_default_sam3_model(mut self) -> Self {
         self.segmenter.dir = default_sam3_dir();
         self.segmenter.mirrors_file = config_dir().map(|d| d.join("models").join("sam3-mirrors.txt"));
+        self.segmenter.matte_dir = default_matte_dir();
+        self.segmenter.matte_mirrors_file = config_dir().map(|d| d.join("models").join("vitmatte-mirrors.txt"));
         self
     }
 
@@ -285,6 +299,14 @@ mod config_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matte_dir_prefers_the_override() {
+        let config = PathBuf::from("cfg");
+        assert_eq!(matte_dir(Some("elsewhere".into()), Some(config.clone())), Some(PathBuf::from("elsewhere")));
+        assert_eq!(matte_dir(None, Some(config.clone())), Some(config.join("models").join("vitmatte-s")));
+        assert_eq!(matte_dir(Some(std::ffi::OsString::new()), None), None);
+    }
 
     /// A non-empty `LIGHTCRAFT_SAM3_DIR` wins; unset or empty falls back to `<config>/models/sam3` (issue #619).
     #[test]

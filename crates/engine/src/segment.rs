@@ -37,6 +37,16 @@ pub const LICENSE_NAME: &str = "SAM License (Meta)";
 pub const LICENSE_URL: &str = "https://github.com/facebookresearch/sam3/blob/main/LICENSE";
 /// How errors about a missing model start (frontends decide on [`crate::ErrorKind::ModelMissing`], not on this text).
 pub const NOT_INSTALLED: &str = "The SAM 3 model is not installed";
+/// Download size of the matting model (`model.safetensors` of ViTMatte-S).
+pub const MATTE_MODEL_BYTES: u64 = 103_294_572;
+/// The matting model's licence (its weights', not LightCraft's): shown before downloading.
+pub const MATTE_LICENSE_NAME: &str = "Apache-2.0 (HUST, trained on Composition-1k)";
+pub const MATTE_LICENSE_URL: &str = "https://huggingface.co/hustvl/vitmatte-small-composition-1k";
+/// How errors about a missing matting model start (frontends decide on [`crate::ErrorKind::ModelMissing`]).
+pub const MATTE_NOT_INSTALLED: &str = "The ViTMatte-S matting model is not installed";
+/// Side of the tiles the matting model sees, in photo pixels (see `lightcraft_pipeline::matting`).
+#[cfg_attr(not(feature = "sam"), allow(dead_code))]
+const MATTE_EDGE: usize = lightcraft_pipeline::matting::TILE;
 /// Longest a waiting command (CLI, MCP) waits for the model (loading on a CPU can take minutes).
 #[cfg_attr(not(feature = "sam"), allow(dead_code))]
 const WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -64,6 +74,8 @@ pub(crate) enum Tag {
     NewPrompt { photo: PhotoId, mask: Option<u32>, op: String, name: Option<String>, text: String },
     /// A zoomed-in pass for a component, computed from `shape` (without its detail).
     Detail { photo: PhotoId, mask: u32, comp: usize, shape: MaskShape },
+    /// Alpha-matte tiles for a component, computed from `shape` (without its matte).
+    Matte { photo: PhotoId, mask: u32, comp: usize, shape: MaskShape },
 }
 
 /// The model input: 8-bit RGB.
@@ -123,6 +135,10 @@ pub struct Segmenter {
     pub dir: Option<PathBuf>,
     /// The user's list of download mirrors (one base URL per line), if any.
     pub mirrors_file: Option<PathBuf>,
+    /// Where the ViTMatte-S files live (set by the app; `None`: no edge matting).
+    pub matte_dir: Option<PathBuf>,
+    /// The user's list of ViTMatte-S download mirrors (one base URL per line), if any.
+    pub matte_mirrors_file: Option<PathBuf>,
     /// Run requests in the background and apply them in [`Session::segment_poll`] (the
     /// desktop app); otherwise commands wait for their result (CLI, MCP, tests).
     pub background: bool,
@@ -132,6 +148,8 @@ pub struct Segmenter {
     worker: worker::Worker,
     #[cfg(feature = "sam")]
     download: download::Downloader,
+    #[cfg(feature = "sam")]
+    matte_download: download::Downloader,
     #[cfg(feature = "sam")]
     results: (std::sync::mpsc::Sender<worker::Outcome>, std::sync::mpsc::Receiver<worker::Outcome>),
 }
@@ -143,6 +161,8 @@ impl Default for Segmenter {
         Segmenter {
             dir: None,
             mirrors_file: None,
+            matte_dir: None,
+            matte_mirrors_file: None,
             background: false,
             pending: None,
             messages: Vec::new(),
@@ -150,6 +170,8 @@ impl Default for Segmenter {
             worker: worker::Worker::default(),
             #[cfg(feature = "sam")]
             download: download::Downloader::default(),
+            #[cfg(feature = "sam")]
+            matte_download: download::Downloader::default(),
             #[cfg(feature = "sam")]
             results: std::sync::mpsc::channel(),
         }
@@ -200,6 +222,23 @@ impl Segmenter {
         false
     }
 
+    /// Whether an edge-matting pass is queued or running.
+    pub fn matte_busy(&self) -> bool {
+        #[cfg(feature = "sam")]
+        return self.worker.matte() > 0;
+        #[cfg(not(feature = "sam"))]
+        false
+    }
+
+    /// Whether the matting model's files are in place.
+    pub fn matte_installed(&self) -> bool {
+        #[cfg(feature = "sam")]
+        if let Some(dir) = &self.matte_dir {
+            return lightcraft_segment::is_matte_model_dir(dir);
+        }
+        false
+    }
+
     /// Whether the model is in memory (it is unloaded after a while without use).
     pub fn loaded(&self) -> bool {
         #[cfg(feature = "sam")]
@@ -230,6 +269,98 @@ impl Segmenter {
         }
         #[cfg(not(feature = "sam"))]
         DownloadStatus::default()
+    }
+
+    /// The matting model's download state.
+    pub fn matte_download_status(&self) -> DownloadStatus {
+        #[cfg(feature = "sam")]
+        {
+            let s = self.matte_download.status();
+            DownloadStatus {
+                running: s.running,
+                done: s.done,
+                total: s.total,
+                file: s.file,
+                error: s.error,
+                cancelled: s.cancelled,
+                finished: s.finished,
+            }
+        }
+        #[cfg(not(feature = "sam"))]
+        DownloadStatus::default()
+    }
+
+    /// Where the matting model is downloaded from, in order (the user's mirrors first).
+    pub fn matte_mirrors(&self) -> Vec<String> {
+        #[cfg(feature = "sam")]
+        {
+            let extra = std::env::var(lightcraft_segment::fetch::VITMATTE_MIRRORS_ENV).ok();
+            lightcraft_segment::fetch::vitmatte_mirrors(extra.as_deref(), self.matte_mirrors_file.as_deref())
+        }
+        #[cfg(not(feature = "sam"))]
+        Vec::new()
+    }
+
+    /// The matting model's folder if it is installed; otherwise [`crate::EngineError::ModelMissing`]
+    /// (`AiModel::ViTMatte`) saying what to do. It does not need SAM 3 (the selection is stored).
+    pub fn require_matte_model(&self) -> crate::Result<PathBuf> {
+        let other = |why: &str| crate::EngineError::Other(why.into());
+        if !Self::AVAILABLE {
+            return Err(other("AI masks are not available in this build"));
+        }
+        let dir = self.matte_dir.clone().ok_or_else(|| other("no folder is set for the ViTMatte-S model"))?;
+        if self.matte_installed() {
+            return Ok(dir);
+        }
+        let d = self.matte_download_status();
+        let msg = if d.running {
+            let pct = d.done.saturating_mul(100).checked_div(d.total).unwrap_or(0);
+            format!("{MATTE_NOT_INSTALLED} yet: it is downloading ({pct} %).")
+        } else {
+            format!(
+                "{MATTE_NOT_INSTALLED}. Download it (about {:.0} MB, {MATTE_LICENSE_NAME}) when LightCraft offers it, with `segment.model.download {{\"model\": \"vitmatte\", \"acknowledged\": true}}`, or put model.safetensors in {}.",
+                MATTE_MODEL_BYTES as f64 / 1e6,
+                dir.display()
+            )
+        };
+        Err(crate::EngineError::ModelMissing { model: crate::AiModel::ViTMatte, msg })
+    }
+
+    /// Start downloading the matting model (see `segment.model.download`). `Ok(false)` when it is
+    /// installed or downloading already.
+    pub fn start_matte_download(&self, activity: &crate::activity::Activity) -> Result<bool, String> {
+        if !Self::AVAILABLE {
+            return Err("AI masks are not available in this build".into());
+        }
+        let dir = self.matte_dir.clone().ok_or("no folder is set for the ViTMatte-S model")?;
+        if self.matte_installed() {
+            return Ok(false);
+        }
+        #[cfg(feature = "sam")]
+        {
+            let mirrors = self.matte_mirrors();
+            if mirrors.is_empty() {
+                return Err(format!(
+                    "no download location is configured for the ViTMatte-S model (set {})",
+                    lightcraft_segment::fetch::VITMATTE_MIRRORS_ENV
+                ));
+            }
+            let opts = lightcraft_segment::fetch::vitmatte_options();
+            self.matte_download.start(lightcraft_segment::fetch::VITMATTE_FILES, mirrors, dir, opts, activity, "ViTMatte-S")
+        }
+        #[cfg(not(feature = "sam"))]
+        {
+            let _ = (dir, activity);
+            Ok(false)
+        }
+    }
+
+    /// Stop a running matting-model download. False when none runs.
+    pub fn cancel_matte_download(&self) -> bool {
+        #[cfg(feature = "sam")]
+        return self.matte_download.cancel();
+        #[cfg(not(feature = "sam"))]
+        false
     }
 
     /// Where the model is downloaded from, in order (the user's mirrors first).
@@ -324,8 +455,14 @@ const DETAIL_MAX_AREA: f64 = 0.4;
 /// a quarter of its size, at least 12 % of the long edge, at most 2:1, inside the photo
 /// (`aspect` = width / height). `None` when nothing is selected or it is most of the photo.
 pub fn detail_region(seg: &SegMask, aspect: f64) -> Option<[f64; 4]> {
-    let logits = seg.logits()?;
-    let r = seg.bounds()?;
+    detail_region_why(seg, aspect).ok()
+}
+
+/// [`detail_region`], or why there is none.
+pub fn detail_region_why(seg: &SegMask, aspect: f64) -> Result<[f64; 4], &'static str> {
+    const DAMAGED: &str = "the stored selection is damaged";
+    let logits = seg.logits().ok_or(DAMAGED)?;
+    let r = seg.bounds().ok_or(DAMAGED)?;
     let side = seg.side as usize;
     let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
     for (i, l) in logits.iter().enumerate() {
@@ -335,14 +472,14 @@ pub fn detail_region(seg: &SegMask, aspect: f64) -> Option<[f64; 4]> {
         }
     }
     if x0 == usize::MAX {
-        return None;
+        return Err("nothing is selected");
     }
     let (rw, rh) = (r[2] - r[0], r[3] - r[1]);
     let nx = |c: usize| r[0] + c as f64 / side as f64 * rw;
     let ny = |c: usize| r[1] + c as f64 / side as f64 * rh;
     let (bx0, by0, bx1, by1) = (nx(x0), ny(y0), nx(x1), ny(y1));
     if (bx1 - bx0) * (by1 - by0) > DETAIL_MAX_AREA {
-        return None;
+        return Err("selection covers more than 40 % of the photo");
     }
     // in units of the photo's height: x × aspect
     let a = if aspect.is_finite() { aspect.clamp(0.1, 10.0) } else { 1.0 };
@@ -357,16 +494,30 @@ pub fn detail_region(seg: &SegMask, aspect: f64) -> Option<[f64; 4]> {
     let y = (cy - h / 2.0).clamp(0.0, (1.0 - h).max(0.0));
     let out = [x / a, y, (x + w) / a, y + h];
     // a region nearly the whole photo isn't worth a second pass
-    ((out[2] - out[0]) * (out[3] - out[1]) < 0.8).then_some(out)
+    if (out[2] - out[0]) * (out[3] - out[1]) < 0.8 { Ok(out) } else { Err("the zoomed-in area would be most of the photo") }
 }
 
 /// `shape` without its detail patches (what a detail pass was computed from)
 #[cfg_attr(not(feature = "sam"), allow(dead_code))]
 fn strip_detail(mut shape: MaskShape) -> MaskShape {
-    // (nor its edge setting: moving the slider meanwhile keeps the pass)
-    if let MaskShape::Object { detail, edge, .. } | MaskShape::Prompt { detail, edge, .. } = &mut shape {
+    // (nor its edge setting, its matte or the matting switch: changing them meanwhile keeps the pass)
+    if let MaskShape::Object { detail, edge, matte, matting, .. } | MaskShape::Prompt { detail, edge, matte, matting, .. } = &mut shape {
         detail.clear();
+        matte.clear();
         *edge = 0.0;
+        *matting = false;
+    }
+    shape
+}
+
+/// `shape` without its matte tiles (what a matting pass was computed from). The edge setting and
+/// the matting switch don't count: changing them meanwhile keeps the pass.
+#[cfg_attr(not(feature = "sam"), allow(dead_code))]
+fn strip_matte(mut shape: MaskShape) -> MaskShape {
+    if let MaskShape::Object { edge, matte, matting, .. } | MaskShape::Prompt { edge, matte, matting, .. } = &mut shape {
+        matte.clear();
+        *edge = 0.0;
+        *matting = false;
     }
     shape
 }
@@ -421,6 +572,25 @@ impl Session {
         region: Option<[f64; 4]>,
     ) -> Result<worker::Job, String> {
         let dir = self.segmenter.model_dir()?;
+        let (key, render, missing) = self.segment_render(id, region, INPUT_EDGE)?;
+        Ok(worker::Job {
+            dir,
+            key: if region.is_some() { 0 } else { key },
+            render: Some(render),
+            missing,
+            kind,
+            tag,
+            reply,
+            task: None,
+            tiles_out: Vec::new(),
+        })
+    }
+
+    /// The render of photo `id` for a model: the whole photo at `edge` pixels, or `region` of it
+    /// (from a source sharp enough for it) filling `edge × edge`. Also the photo's file when it is
+    /// missing from disk, and the key of the uncropped look.
+    #[cfg(feature = "sam")]
+    fn segment_render(&mut self, id: PhotoId, region: Option<[f64; 4]>, edge: usize) -> Result<(u64, crate::media::RenderJob, Option<String>), String> {
         // old masks go onto the photo first: the selection that comes back is in its coordinates
         if let Some(cur) = self.develop_of(id).filter(|d| d.masks.iter().any(|m| !m.on_photo)) {
             let mut on = (*cur).clone();
@@ -435,21 +605,21 @@ impl Session {
             _ => None,
         };
         let render = match region {
-            None => self.preview_job(id, INPUT_EDGE, INPUT_EDGE, false, &d).ok_or("no such photo")?,
+            None => self.preview_job(id, edge, edge, false, &d).ok_or("no such photo")?,
             Some(region) => {
                 d.crop.geometry =
                     lightcraft_geom::CropGeometry { rect: lightcraft_geom::Rect::new(region[0], region[1], region[2], region[3]), angle: 0.0 };
                 d.crop.flip_h = false;
                 d.crop.flip_v = false;
                 d.geometry.constrain_crop = false;
-                let mut job = self.preview_job(id, INPUT_EDGE, INPUT_EDGE, true, &d).ok_or("no such photo")?;
+                let mut job = self.preview_job(id, edge, edge, true, &d).ok_or("no such photo")?;
                 let frac = (region[2] - region[0]).max(region[3] - region[1]).max(0.01);
-                job.level = crate::media::SourceLevel::for_size((INPUT_EDGE as f64 / frac) as usize);
+                job.level = crate::media::SourceLevel::for_size((edge as f64 / frac) as usize);
                 job.source = self.media.source_ref(&p, job.level);
                 job
             }
         };
-        Ok(worker::Job { dir, key: if region.is_some() { 0 } else { key }, render: Some(render), missing, kind, tag, reply })
+        Ok((key, render, missing))
     }
 
     /// Send a request and wait for its result (CLI, MCP, tests; or when not in background mode).
@@ -576,6 +746,11 @@ impl Session {
     /// otherwise it is applied before this returns. `Ok(false)` when there is nothing to
     /// refine (no selection yet, or it is most of the photo) or a pass is running already.
     pub fn segment_detail(&mut self, id: PhotoId, mask: u32, comp: usize) -> Result<bool, String> {
+        Ok(self.segment_detail_why(id, mask, comp)?.is_ok())
+    }
+
+    /// [`Session::segment_detail`], saying why nothing was started.
+    pub fn segment_detail_why(&mut self, id: PhotoId, mask: u32, comp: usize) -> Result<Result<(), &'static str>, String> {
         self.segmenter.model_dir()?;
         let d = self.develop_of(id).ok_or("no such photo")?;
         let shape = d.masks.iter().find(|m| m.id == mask).and_then(|m| m.components.get(comp)).map(|c| c.shape.clone()).ok_or("no such mask")?;
@@ -585,33 +760,133 @@ impl Session {
                 (seg.clone(), Prompt::Clicks(clicks_of(hint, exclude)))
             }
             MaskShape::Prompt { text, seg: Some(seg), .. } => (seg.clone(), Prompt::Text(text.clone())),
-            _ => return Ok(false),
+            _ => return Ok(Err("the component has no stored selection with clicks or a description to refine")),
         };
         let p = self.catalog.photo(id).ok_or("no such photo")?;
         let (pw, ph) = (f64::from(p.width.max(1)), f64::from(p.height.max(1)));
         let aspect = if d.orientation.swaps_axes() { ph / pw } else { pw / ph };
-        let Some(region) = detail_region(&seg, aspect) else { return Ok(false) };
+        let region = match detail_region_why(&seg, aspect) {
+            Ok(r) => r,
+            Err(why) => return Ok(Err(why)),
+        };
         #[cfg(feature = "sam")]
         {
             let kind = worker::Kind::Detail { prompt, region };
             let tag = Tag::Detail { photo: id, mask, comp, shape: strip_detail(shape) };
             if self.segmenter.background {
                 if self.segmenter.detail_busy() {
-                    return Ok(false);
+                    return Ok(Err("a detail pass is already running"));
                 }
                 self.segment_queue(id, kind, tag, Some(region))?;
             } else {
                 let patch = self.segment_wait(id, kind, Some(region))?;
-                let outcome = worker::Outcome { tag, result: Ok(patch), superseded: false, notice: None };
+                let outcome = worker::Outcome { tag, result: Ok(patch), matte: Vec::new(), superseded: false, notice: None };
                 let mut polled = Polled::default();
                 self.apply_outcome(outcome, &mut polled);
             }
-            Ok(true)
+            Ok(Ok(()))
         }
         #[cfg(not(feature = "sam"))]
         {
             let _ = (prompt, region, mask);
-            Ok(false)
+            Ok(Err("AI masks are not available in this build"))
+        }
+    }
+
+    /// Start matting the edge of component `comp` of mask `mask` on photo `id` (an Object or
+    /// Describe selection with a stored segmentation): ViTMatte-S runs on full-resolution tiles
+    /// of the edge band and the result is stored with the mask (`matte`). Needs the matting
+    /// model, not SAM 3. In background mode [`Session::segment_poll`] applies the result;
+    /// otherwise it is applied before this returns. `Ok(Ok(tiles))` when it started (or, waiting,
+    /// finished), `Ok(Err(why))` when there is nothing to matte.
+    pub fn segment_matte(&mut self, id: PhotoId, mask: u32, comp: usize) -> Result<Result<usize, &'static str>, String> {
+        self.segmenter.require_matte_model().map_err(|e| e.to_string())?;
+        let d = self.develop_of(id).ok_or("no such photo")?;
+        let shape = d.masks.iter().find(|m| m.id == mask).and_then(|m| m.components.get(comp)).map(|c| c.shape.clone()).ok_or("no such mask")?;
+        let (seg, detail) = match &shape {
+            MaskShape::Object { seg, detail, .. } | MaskShape::Prompt { seg, detail, .. } => (seg.clone(), detail.clone()),
+            _ => return Ok(Err("the component is not an Object or Describe selection")),
+        };
+        if seg.is_none() && detail.is_empty() {
+            return Ok(Err("nothing is selected yet"));
+        }
+        let p = self.catalog.photo(id).ok_or("no such photo")?;
+        let (pw, ph) = (p.width.max(1) as usize, p.height.max(1) as usize);
+        let photo_px = if d.orientation.swaps_axes() { (ph, pw) } else { (pw, ph) };
+        #[cfg(feature = "sam")]
+        {
+            let Some(plan) = lightcraft_pipeline::matting::Plan::new(seg.as_ref(), &detail, photo_px) else {
+                return Ok(Err("the stored selection is damaged or the photo is too small"));
+            };
+            let tiles = plan.tiles();
+            if tiles.is_empty() {
+                return Ok(Err("the selection has no uncertain edge to refine"));
+            }
+            let dir = self.segmenter.matte_dir.clone().unwrap_or_default();
+            let mut jobs = Vec::with_capacity(tiles.len());
+            let mut missing = None;
+            for tile in tiles {
+                let (_, render, gone) = self.segment_render(id, Some(tile.rect), MATTE_EDGE)?;
+                missing = missing.or(gone);
+                let trimap = plan.trimap(&tile, tile.px.0, tile.px.1);
+                jobs.push(worker::MatteTile { tile, trimap, render });
+            }
+            let count = jobs.len();
+            let guard = self.activity.start("matte", "Matting mask edges", crate::activity::Cancel::Yes);
+            guard.progress(0, count as u64);
+            let kind = worker::Kind::Matte { dir, tiles: jobs, task: guard.handle() };
+            let tag = Tag::Matte { photo: id, mask, comp, shape: strip_matte(shape) };
+            let (reply, results) = if self.segmenter.background {
+                (self.segmenter.results.0.clone(), None)
+            } else {
+                let (tx, rx) = std::sync::mpsc::channel();
+                (tx, Some(rx))
+            };
+            let job = worker::Job {
+                dir: PathBuf::new(),
+                key: 0,
+                render: None,
+                missing,
+                kind,
+                tag: if results.is_some() { Tag::Wait } else { tag.clone() },
+                reply,
+                task: Some(guard),
+                tiles_out: Vec::new(),
+            };
+            self.segmenter.worker.submit(job)?;
+            if let Some(rx) = results {
+                let o = rx.recv_timeout(WAIT).map_err(|_| "the matting model took too long; try again".to_string())?;
+                self.segmenter.messages.extend(o.notice);
+                o.result?;
+                let outcome = worker::Outcome { tag, result: Ok(None), matte: o.matte, superseded: false, notice: None };
+                let mut polled = Polled::default();
+                self.apply_outcome(outcome, &mut polled);
+                self.segmenter.messages.extend(polled.messages);
+            }
+            Ok(Ok(count))
+        }
+        #[cfg(not(feature = "sam"))]
+        {
+            let _ = (seg, detail, photo_px, mask);
+            Ok(Err("AI masks are not available in this build"))
+        }
+    }
+
+    /// After a new or refined selection: matte its edge when the component's `matting` is on and
+    /// the matting model is there (errors are logged; a missing model is not worth a message).
+    pub(crate) fn matte_if_on(&mut self, photo: PhotoId, mask: u32, comp: usize) {
+        let on = self.develop_of(photo).is_some_and(|d| {
+            d.masks.iter().find(|m| m.id == mask).and_then(|m| m.components.get(comp)).is_some_and(|c| {
+                matches!(c.shape, MaskShape::Object { matting: true, .. } | MaskShape::Prompt { matting: true, .. })
+            })
+        });
+        if !on || !self.segmenter.matte_installed() {
+            return;
+        }
+        match self.segment_matte(photo, mask, comp) {
+            Ok(Ok(_)) => {}
+            Ok(Err(why)) => log::info!("edge matting skipped: {why}"),
+            Err(e) => log::warn!("edge matting: {e}"),
         }
     }
 
@@ -667,10 +942,20 @@ impl Session {
                 // (a new selection drops the old matte; `matting` stays on)
                 c.shape =
                     MaskShape::Object { hint: latest.hint, exclude: latest.exclude, seg: Some(seg), detail: vec![], edge, matte: vec![], matting };
+                let seg_aspect = self.catalog.photo(photo).map_or(1.0, |p| {
+                    let (pw, ph) = (f64::from(p.width.max(1)), f64::from(p.height.max(1)));
+                    if d.orientation.swaps_axes() { ph / pw } else { pw / ph }
+                });
+                let wants_detail = matches!(&d.masks.iter().find(|m| m.id == mask).and_then(|m| m.components.get(comp)).map(|c| &c.shape),
+                    Some(MaskShape::Object { seg: Some(s), .. }) if detail_region(s, seg_aspect).is_some());
                 match self.set_develop(photo, d, "Object Mask") {
                     Ok(()) => {
                         polled.changed = true;
                         polled.refine = Some(mask);
+                        // (a detail pass follows when there is a region to zoom into, and mattes after it)
+                        if !wants_detail {
+                            self.matte_if_on(photo, mask, comp);
+                        }
                     }
                     Err(e) => polled.messages.push(e.to_string()),
                 }
@@ -721,12 +1006,43 @@ impl Session {
                     return; // clicked again meanwhile: a newer pass will follow
                 }
                 match &mut c.shape {
-                    MaskShape::Object { detail, .. } | MaskShape::Prompt { detail, .. } => *detail = vec![patch],
+                    // (a matte was computed from the selection as it was: it is redone below)
+                    MaskShape::Object { detail, matte, .. } | MaskShape::Prompt { detail, matte, .. } => {
+                        *detail = vec![patch];
+                        matte.clear();
+                    }
                     _ => return,
                 }
                 match self.set_develop(photo, d, "AI Mask Detail") {
-                    Ok(()) => polled.changed = true,
+                    Ok(()) => {
+                        polled.changed = true;
+                        self.matte_if_on(photo, mask, comp);
+                    }
                     Err(e) => log::warn!("AI mask detail: {e}"),
+                }
+            }
+            Tag::Matte { photo, mask, comp, shape } => {
+                match o.result {
+                    Ok(_) => {}
+                    Err(e) if e == worker::MATTE_CANCELLED => return,
+                    Err(e) => return polled.messages.push(e),
+                }
+                if o.matte.is_empty() {
+                    return;
+                }
+                let Some(d) = self.develop_of(photo) else { return };
+                let mut d = (*d).clone();
+                let Some(c) = d.masks.iter_mut().find(|m| m.id == mask).and_then(|m| m.components.get_mut(comp)) else { return };
+                if strip_matte(c.shape.clone()) != shape {
+                    return; // the selection changed meanwhile: a newer pass will follow
+                }
+                match &mut c.shape {
+                    MaskShape::Object { matte, matting, .. } | MaskShape::Prompt { matte, matting, .. } if *matting => *matte = o.matte,
+                    _ => return, // (switched off meanwhile)
+                }
+                match self.set_develop(photo, d, "AI Mask Edge Matting") {
+                    Ok(()) => polled.changed = true,
+                    Err(e) => polled.messages.push(e.to_string()),
                 }
             }
         }
@@ -743,7 +1059,7 @@ mod tests {
         // the job after which the model runs on the CPU (the GPU failed) says so
         let mut s = Session::with_demo();
         let notice = Some(worker::GPU_FAILED.to_string());
-        s.segmenter.results.0.send(worker::Outcome { tag: Tag::Prepare, result: Ok(None), superseded: false, notice }).unwrap();
+        s.segmenter.results.0.send(worker::Outcome { tag: Tag::Prepare, result: Ok(None), matte: Vec::new(), superseded: false, notice }).unwrap();
         let polled = s.segment_poll();
         assert_eq!(polled.messages, vec![worker::GPU_FAILED.to_string()]);
         assert!(s.segment_poll().messages.is_empty(), "once");
