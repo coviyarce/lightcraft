@@ -144,7 +144,7 @@ impl Plan {
         let mut found: Vec<(usize, usize, usize)> = Vec::new();
         for &oy in &ys {
             for &ox in &xs {
-                let n = band.count(ox, oy, ts, self.photo);
+                let n = band.count(ox, oy, ts);
                 if n > 0 {
                     found.push((n, ox, oy));
                 }
@@ -256,7 +256,7 @@ impl Band {
     }
 
     /// Band cells inside the `ts`-pixel square at photo pixel (`ox`, `oy`).
-    fn count(&self, ox: usize, oy: usize, ts: usize, _photo: (usize, usize)) -> usize {
+    fn count(&self, ox: usize, oy: usize, ts: usize) -> usize {
         let cell = |p: f64, max: usize| ((p / self.s).floor().max(0.0) as usize).min(max);
         let (x0, y0) = (cell(ox as f64, self.w), cell(oy as f64, self.h));
         let (x1, y1) = (cell(((ox + ts) as f64 / self.s).ceil() * self.s, self.w), cell(((oy + ts) as f64 / self.s).ceil() * self.s, self.h));
@@ -632,8 +632,8 @@ mod tests {
         let plan = Plan::new(Some(&seg), &[], (4000, 3000)).unwrap();
         let t = Tile { rect: [0.4, 0.4, 0.6, 0.6], origin: (1600, 1200), px: (512, 512) };
         let tri = plan.trimap(&t, 512, 512);
-        assert!(tri.iter().any(|v| *v == 255), "the strip survives as sure foreground");
-        assert!(tri.iter().any(|v| *v == 0));
+        assert!(tri.contains(&255), "the strip survives as sure foreground");
+        assert!(tri.contains(&0));
         assert!(tri.iter().all(|v| [0, 128, 255].contains(v)));
     }
 
