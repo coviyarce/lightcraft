@@ -33,15 +33,26 @@ pub fn is_matte_model_dir(dir: &Path) -> bool {
     dir.join(MATTE_WEIGHTS_FILE).is_file()
 }
 
-/// A convolution with its batch norm folded in (inference), optionally followed by ReLU.
+/// A convolution with its batch norm folded in (inference), followed by ReLU.
 struct ConvBn {
     conv: Conv2d,
-    relu: bool,
+}
+
+/// Shape of a [`ConvBn`]: input and output channels, kernel size, stride, and whether the
+/// convolution has a bias of its own.
+#[derive(Clone, Copy)]
+struct ConvSpec {
+    inp: usize,
+    out: usize,
+    k: usize,
+    stride: usize,
+    bias: bool,
 }
 
 impl ConvBn {
-    /// `conv_vb` holds `weight` (and `bias` when `bias`), `bn_vb` the batch norm's tensors.
-    fn new(inp: usize, out: usize, k: usize, stride: usize, bias: bool, relu: bool, conv_vb: VarBuilder, bn_vb: VarBuilder) -> Result<Self> {
+    /// `conv_vb` holds `weight` (and `bias` when the spec says so), `bn_vb` the batch norm's tensors.
+    fn new(spec: ConvSpec, conv_vb: VarBuilder, bn_vb: VarBuilder) -> Result<Self> {
+        let ConvSpec { inp, out, k, stride, bias } = spec;
         let w = conv_vb.get((out, inp, k, k), "weight")?;
         let b = if bias { conv_vb.get(out, "bias")? } else { Tensor::zeros(out, DType::F32, w.device())? };
         let (gamma, beta) = (bn_vb.get(out, "weight")?, bn_vb.get(out, "bias")?);
@@ -50,12 +61,11 @@ impl ConvBn {
         let w = w.broadcast_mul(&scale.reshape((out, 1, 1, 1))?)?;
         let b = (((b - mean)? * &scale)? + beta)?;
         let cfg = Conv2dConfig { padding: k / 2, stride, ..Default::default() };
-        Ok(Self { conv: Conv2d::new(w, Some(b), cfg), relu })
+        Ok(Self { conv: Conv2d::new(w, Some(b), cfg) })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = self.conv.forward(x)?;
-        Ok(if self.relu { x.relu()? } else { x })
+        Ok(self.conv.forward(x)?.relu()?)
     }
 }
 
@@ -72,17 +82,17 @@ impl Decoder {
         let chans = [IN_CHANNELS, CONVSTREAM[0], CONVSTREAM[1], CONVSTREAM[2]];
         for i in 0..CONVSTREAM.len() {
             let v = vb.pp(format!("convstream.convs.{i}"));
-            convstream.push(ConvBn::new(chans[i], chans[i + 1], 3, 2, false, true, v.pp("conv"), v.pp("batch_norm"))?);
+            convstream.push(ConvBn::new(ConvSpec { inp: chans[i], out: chans[i + 1], k: 3, stride: 2, bias: false }, v.pp("conv"), v.pp("batch_norm"))?);
         }
         let mut fusion = Vec::new();
         let ins = [HIDDEN, FUSION[0], FUSION[1], FUSION[2]];
         for i in 0..FUSION.len() {
             let detail = chans[chans.len() - 1 - i];
             let v = vb.pp(format!("fusion_blocks.{i}.conv"));
-            fusion.push(ConvBn::new(ins[i] + detail, FUSION[i], 3, 1, false, true, v.pp("conv"), v.pp("batch_norm"))?);
+            fusion.push(ConvBn::new(ConvSpec { inp: ins[i] + detail, out: FUSION[i], k: 3, stride: 1, bias: false }, v.pp("conv"), v.pp("batch_norm"))?);
         }
         let h = vb.pp("matting_head.matting_convs");
-        let head_conv = ConvBn::new(FUSION[3], 16, 3, 1, true, true, h.pp("0"), h.pp("1"))?;
+        let head_conv = ConvBn::new(ConvSpec { inp: FUSION[3], out: 16, k: 3, stride: 1, bias: true }, h.pp("0"), h.pp("1"))?;
         let head_out = candle_nn::conv2d(16, 1, 1, Default::default(), h.pp("3"))?;
         Ok(Self { convstream, fusion, head_conv, head_out })
     }
@@ -109,7 +119,7 @@ impl Decoder {
             }
         }
         let a = candle_nn::ops::sigmoid(&self.head_out.forward(&self.head_conv.forward(&x)?)?)?;
-        if let Some(s) = stages.as_deref_mut() {
+        if let Some(s) = stages {
             s.push(("alphas".into(), a.clone()));
         }
         Ok(a)
