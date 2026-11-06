@@ -722,7 +722,7 @@ fn the_photos_edge_does_not_steer_a_matte() {
 
 #[test]
 fn the_edge_setting_still_hardens_and_feathers_a_matte() {
-    let tile = matte_tile(32, [0.0, 0.0, 1.0, 1.0], |u, _| ((u - 0.5) * 3.0 + 0.5).clamp(0.0, 1.0) as f32);
+    let tile = matte_tile(32, [0.0, 0.0, 1.0, 1.0], |u, _| ((u - 0.5) * 12.0 + 0.5).clamp(0.0, 1.0) as f32);
     let (w, h) = (400, 20);
     let soft_px = |edge: f64| {
         let a = shape_alpha(&prompt_with_matte(None, vec![tile.clone()], edge), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
