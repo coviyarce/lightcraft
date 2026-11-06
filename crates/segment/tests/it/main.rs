@@ -2,3 +2,4 @@
 
 mod reference;
 mod remote;
+mod vitmatte_reference;

@@ -1,0 +1,8 @@
+# Python packages for tools/vitmatte_reference.py (reference tensors for crates/segment/tests/it/vitmatte_reference.rs).
+#   python3 -m venv .venv-vitmatte && .venv-vitmatte/bin/pip install -r tools/requirements-vitmatte-reference.txt
+# (on a machine without a GPU, install torch from https://download.pytorch.org/whl/cpu first)
+torch>=2.6
+transformers>=4.57
+pillow
+safetensors
+numpy

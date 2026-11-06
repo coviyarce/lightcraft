@@ -42,6 +42,14 @@ the facebook/sam3 checkpoint only when they choose to (in the app, or by hand), 
 License (https://github.com/facebookresearch/sam3/blob/main/LICENSE), a separate, non-OSI
 licence. See docs/ai-masks.md.
 
+crates/segment also ports the ViTMatte and ViTDet model code of Hugging Face Transformers
+(https://github.com/huggingface/transformers, src/transformers/models/vitmatte and
+src/transformers/models/vitdet), Copyright The HuggingFace Team, licensed under the Apache License
+2.0 and modified by the LightCraft contributors (2026) as described above. The ViTMatte-S weights
+are not part of LightCraft and are never distributed with it. A user downloads the
+hustvl/vitmatte-small-composition-1k checkpoint (Apache License 2.0) only when they choose to. See
+docs/ai-masks.md.
+
 AI denoise weights are not part of LightCraft and are never distributed with it.
 The default build offers user-supplied models only. The optional rawnind-model
 feature offers a separately downloaded RawNIND UtNet2 Bayer checkpoint under
