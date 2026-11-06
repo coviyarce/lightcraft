@@ -440,8 +440,15 @@ mod tests {
         for whole in [8.0f32, -8.0] {
             let detail = SegMask::from_logits_in(SIDE, &[8.0; SIDE * SIDE], [0.4, 0.4, 0.6, 0.6]);
             let coarse = SegMask::from_logits(SIDE, &[whole; SIDE * SIDE]);
-            let mut m =
-                mask(MaskShape::Object { hint: vec![Point::new(0.5, 0.5)], exclude: Vec::new(), seg: Some(coarse), detail: vec![detail], edge: 0.0, matte: vec![], matting: false });
+            let mut m = mask(MaskShape::Object {
+                hint: vec![Point::new(0.5, 0.5)],
+                exclude: Vec::new(),
+                seg: Some(coarse),
+                detail: vec![detail],
+                edge: 0.0,
+                matte: vec![],
+                matting: false,
+            });
             m.on_photo = false;
             attach(&mut m, &frame);
             let MaskShape::Object { detail, .. } = &m.components[0].shape else { panic!() };

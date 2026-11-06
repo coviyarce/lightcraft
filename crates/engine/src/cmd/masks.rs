@@ -53,10 +53,23 @@ fn shape_from(kind: &str, p: &Value, c: &str) -> Result<MaskShape> {
                 .unwrap_or_default();
             MaskShape::ColorRange { samples, refine: f64_or(p, "refine", 50.0) }
         }
-        "object" => MaskShape::Object { hint: points(p, "points"), exclude: points(p, "exclude"), seg: seg_param(p), detail: vec![], edge: 0.0, matte: vec![], matting: false },
-        "prompt" => {
-            MaskShape::Prompt { text: str_param(p, "text").unwrap_or_default().trim().to_string(), seg: seg_param(p), detail: vec![], edge: 0.0, matte: vec![], matting: false }
-        }
+        "object" => MaskShape::Object {
+            hint: points(p, "points"),
+            exclude: points(p, "exclude"),
+            seg: seg_param(p),
+            detail: vec![],
+            edge: 0.0,
+            matte: vec![],
+            matting: false,
+        },
+        "prompt" => MaskShape::Prompt {
+            text: str_param(p, "text").unwrap_or_default().trim().to_string(),
+            seg: seg_param(p),
+            detail: vec![],
+            edge: 0.0,
+            matte: vec![],
+            matting: false,
+        },
         other => {
             return Err(bad(
                 c,

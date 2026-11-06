@@ -22,7 +22,15 @@ fn stored_segmentations_render_at_any_size_and_follow_the_crop() {
     let logits: Vec<f32> = (0..side * side).map(|i| if i % side < side / 2 { 12.0 } else { -12.0 }).collect();
     let seg = SegMask::from_logits(side, &logits);
     for shape in [
-        MaskShape::Object { hint: vec![Point::new(0.25, 0.5)], exclude: vec![], seg: Some(seg.clone()), detail: vec![], edge: 0.0, matte: vec![], matting: false },
+        MaskShape::Object {
+            hint: vec![Point::new(0.25, 0.5)],
+            exclude: vec![],
+            seg: Some(seg.clone()),
+            detail: vec![],
+            edge: 0.0,
+            matte: vec![],
+            matting: false,
+        },
         MaskShape::Prompt { text: "left".into(), seg: Some(seg.clone()), detail: vec![], edge: 0.0, matte: vec![], matting: false },
     ] {
         for (w, h) in [(40, 20), (400, 200)] {
@@ -50,7 +58,15 @@ fn detail_patches_replace_the_coarse_mask_inside_their_rectangle() {
     let side = 16;
     let l: Vec<f32> = (0..side * side).map(|i| if i % side < side / 2 { 12.0 } else { -12.0 }).collect();
     let patch = SegMask::from_logits_in(side, &l, [0.5, 0.0, 1.0, 1.0]);
-    let shape = MaskShape::Object { hint: vec![Point::new(0.6, 0.5)], exclude: vec![], seg: Some(coarse), detail: vec![patch], edge: 0.0, matte: vec![], matting: false };
+    let shape = MaskShape::Object {
+        hint: vec![Point::new(0.6, 0.5)],
+        exclude: vec![],
+        seg: Some(coarse),
+        detail: vec![patch],
+        edge: 0.0,
+        matte: vec![],
+        matting: false,
+    };
     let (w, h) = (200, 100);
     let a = shape_alpha(&shape, &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
     assert!(a.get(20, 50) < 0.01, "outside the patch: the coarse mask");
@@ -65,7 +81,15 @@ fn a_hostile_number_of_detail_patches_is_capped() {
     let side = 1024;
     let l: Vec<f32> = vec![12.0; side * side];
     let patch = SegMask::from_logits_in(side, &l, [0.0, 0.0, 0.5, 1.0]);
-    let shape = MaskShape::Object { hint: vec![Point::new(0.2, 0.5)], exclude: vec![], seg: None, detail: vec![patch; 20_000], edge: 0.0, matte: vec![], matting: false };
+    let shape = MaskShape::Object {
+        hint: vec![Point::new(0.2, 0.5)],
+        exclude: vec![],
+        seg: None,
+        detail: vec![patch; 20_000],
+        edge: 0.0,
+        matte: vec![],
+        matting: false,
+    };
     let (w, h) = (64, 32);
     let t = std::time::Instant::now();
     let a = shape_alpha(&shape, &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
@@ -660,7 +684,8 @@ fn a_matte_tile_wins_inside_its_rectangle_and_leaves_the_outside_alone() {
     let coarse = SegMask::from_logits(16, &l);
     let tile = matte_tile(32, [0.5, 0.0, 1.0, 1.0], |u, _| u as f32);
     let (w, h) = (400, 100);
-    let with = shape_alpha(&prompt_with_matte(Some(coarse.clone()), vec![tile], 0.0), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
+    let with =
+        shape_alpha(&prompt_with_matte(Some(coarse.clone()), vec![tile], 0.0), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
     let without = shape_alpha(&prompt_with_matte(Some(coarse), vec![], 0.0), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
     for x in 0..w / 2 - 1 {
         assert_eq!(with.get(x, 50), without.get(x, 50), "outside the tile, x = {x}");
@@ -746,6 +771,7 @@ fn damaged_or_absurd_matte_tiles_select_nothing_and_do_not_panic() {
     nan_rect.rect = Some([f64::NAN, 0.0, 1.0, 1.0]);
     let huge = SegMask { side: u32::MAX, data: String::new(), rect: None, grid: None };
     let (w, h) = (16, 16);
-    let a = shape_alpha(&prompt_with_matte(None, vec![bad, nan_rect, huge], 0.0), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
+    let a =
+        shape_alpha(&prompt_with_matte(None, vec![bad, nan_rect, huge], 0.0), &frame(w, h), w, h, &Rgb32f::new(w, h), &Plane::new(w, h), 0.0, None);
     assert!(a.data.iter().all(|v| *v < 0.01));
 }

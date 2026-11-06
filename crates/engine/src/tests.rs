@@ -1575,7 +1575,8 @@ fn ai_masks_without_the_model_explain_themselves() {
     assert!(!e.contains("invalid parameters"), "shown as is: {e}");
     assert!(s.develop_of(id).unwrap().masks.is_empty());
     // an empty Object component (as an older document may hold) still takes clicks
-    let shape = lightcraft_develop::MaskShape::Object { hint: vec![], exclude: vec![], seg: None, detail: vec![], edge: 0.0, matte: vec![], matting: false };
+    let shape =
+        lightcraft_develop::MaskShape::Object { hint: vec![], exclude: vec![], seg: None, detail: vec![], edge: 0.0, matte: vec![], matting: false };
     let mut d = (*s.develop_of(id).unwrap()).clone();
     d.masks.push(lightcraft_develop::Mask {
         id: 1,

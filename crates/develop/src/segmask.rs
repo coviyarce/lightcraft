@@ -311,7 +311,14 @@ mod tests {
                 name: None,
                 op: crate::MaskOp::Add,
                 invert: false,
-                shape: crate::MaskShape::Prompt { text: "x".into(), seg: None, detail: vec![SegMask::from_logits(4, &[1.0; 16]); 50], edge: 0.0, matte: vec![], matting: false },
+                shape: crate::MaskShape::Prompt {
+                    text: "x".into(),
+                    seg: None,
+                    detail: vec![SegMask::from_logits(4, &[1.0; 16]); 50],
+                    edge: 0.0,
+                    matte: vec![],
+                    matting: false,
+                },
             }],
             ..Default::default()
         });

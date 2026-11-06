@@ -378,7 +378,9 @@ impl MatteGrid {
     /// The bilinearly sampled logit at normalized image point `n`, like [`SegGrid::logit`].
     fn logit(&self, n: Point) -> f32 {
         let side = self.side;
-        let at = |x: usize, y: usize| self.cells.get(y.min(side - 1) * side + x.min(side - 1)).map_or(-16.0, |c| f32::from(*c) / lightcraft_develop::segmask::SCALE);
+        let at = |x: usize, y: usize| {
+            self.cells.get(y.min(side - 1) * side + x.min(side - 1)).map_or(-16.0, |c| f32::from(*c) / lightcraft_develop::segmask::SCALE)
+        };
         let u = (n.x - self.r[0]) / (self.r[2] - self.r[0]);
         let v = (n.y - self.r[1]) / (self.r[3] - self.r[1]);
         let (fx, fy) = ((u * side as f64 - 0.5) as f32, (v * side as f64 - 0.5) as f32);
@@ -437,7 +439,17 @@ const SEG_EPS: f32 = 0.01;
 /// already are an alpha, so the guided filter would only move their edge. `gain` still scales
 /// their logits (a negative Edge hardens a matte too).
 #[allow(clippy::too_many_arguments)]
-fn sample_seg(seg: Option<&SegMask>, detail: &[SegMask], matte: &[SegMask], gain: f32, frame: &Frame, w: usize, h: usize, log_l: &Plane, out: &mut Plane) {
+fn sample_seg(
+    seg: Option<&SegMask>,
+    detail: &[SegMask],
+    matte: &[SegMask],
+    gain: f32,
+    frame: &Frame,
+    w: usize,
+    h: usize,
+    log_l: &Plane,
+    out: &mut Plane,
+) {
     let coarse = seg.and_then(SegGrid::new);
     // (capped: a hostile document can hold many)
     let patches: Vec<SegGrid> = detail.iter().take(lightcraft_develop::segmask::MAX_DETAIL).filter_map(SegGrid::new).collect();

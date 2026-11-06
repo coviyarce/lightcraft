@@ -241,9 +241,24 @@ fn a_mask_overlay_window_matches_the_whole_render() {
         ("linear refined", MaskShape::Linear { start: Point::new(0.45, 0.5), end: Point::new(0.55, 0.5) }, 100.0),
         ("sky", MaskShape::Sky, 0.0),
         // a model's grid, enlarged along the photo's edges (issue #3272)
-        ("prompt", MaskShape::Prompt { text: "middle".into(), seg: Some(middle_seg(32)), detail: vec![], edge: 0.0, matte: vec![], matting: false }, 0.0),
+        (
+            "prompt",
+            MaskShape::Prompt { text: "middle".into(), seg: Some(middle_seg(32)), detail: vec![], edge: 0.0, matte: vec![], matting: false },
+            0.0,
+        ),
         // the same with a matte over its edge band (not steered by the photo)
-        ("prompt with a matte", MaskShape::Prompt { text: "middle".into(), seg: Some(middle_seg(32)), detail: vec![], edge: 0.0, matte: vec![middle_matte(48)], matting: true }, 0.0),
+        (
+            "prompt with a matte",
+            MaskShape::Prompt {
+                text: "middle".into(),
+                seg: Some(middle_seg(32)),
+                detail: vec![],
+                edge: 0.0,
+                matte: vec![middle_matte(48)],
+                matting: true,
+            },
+            0.0,
+        ),
     ];
     for (name, shape, refine) in shapes {
         let mut s = DevelopSettings::default();
