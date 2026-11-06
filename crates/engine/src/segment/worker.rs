@@ -609,6 +609,9 @@ fn run_matte(
 ) -> Result<Vec<SegMask>, Failure> {
     let total = tiles.len() as u64;
     task.progress(0, total);
+    if task.is_cancelled() {
+        return Err(Failure::Other(MATTE_CANCELLED.into()));
+    }
     matte_model(state, dir, placement)?;
     let t0 = web_time::Instant::now();
     let mut placed: Vec<Tile> = Vec::new();
@@ -772,5 +775,77 @@ mod tests {
         assert_eq!(out.len(), 3);
         assert!(out[0].superseded && out[1].superseded && !out[2].superseded);
         assert_eq!(shared.pending.load(Ordering::SeqCst), 0);
+    }
+
+    /// A matting request with no tiles for `dir`, whose row is in `activity`.
+    fn matte_job(tag: Tag, reply: &mpsc::Sender<Outcome>, activity: &crate::activity::Activity, dir: PathBuf) -> (Job, u64) {
+        let guard = activity.start("matte", "Matting mask edges", crate::activity::Cancel::Yes);
+        let id = guard.id();
+        let mut j = job(tag, reply);
+        j.kind = Kind::Matte { dir, tiles: Vec::new(), task: guard.handle() };
+        j.task = Some(guard);
+        (j, id)
+    }
+
+    fn matte_tag(comp: usize) -> Tag {
+        Tag::Matte { photo: lightcraft_catalog::PhotoId(1), mask: 1, comp, shape: lightcraft_develop::MaskShape::Sky }
+    }
+
+    #[test]
+    fn a_matting_pass_without_the_model_is_an_error_and_its_row_goes() {
+        let activity = crate::activity::Activity::default();
+        let (tx, rx) = mpsc::channel();
+        let (jtx, jrx) = mpsc::channel();
+        let (j, _) = matte_job(matte_tag(0), &tx, &activity, std::env::temp_dir().join(format!("lc-matte-none-{}", std::process::id())));
+        jtx.send(j).unwrap();
+        drop(jtx);
+        let shared = Shared::default();
+        shared.matte.store(1, Ordering::SeqCst);
+        run(&jrx, &shared, Duration::from_secs(60), Placement::Gpu);
+        let o = rx.recv().unwrap();
+        let e = o.result.unwrap_err();
+        assert!(e.contains("ViTMatte") && e.contains("not found"), "{e}");
+        assert!(o.matte.is_empty());
+        assert_eq!(o.notice, None, "a missing model is not retried on the CPU");
+        assert_eq!(shared.matte.load(Ordering::SeqCst), 0, "counted under matte, not pending");
+        assert_eq!(shared.pending.load(Ordering::SeqCst), 0);
+        assert!(activity.list().is_empty(), "the row is gone before the reply");
+    }
+
+    #[test]
+    fn a_cancelled_matting_pass_stops_before_it_loads_anything() {
+        let activity = crate::activity::Activity::default();
+        let (tx, rx) = mpsc::channel();
+        let (jtx, jrx) = mpsc::channel();
+        let (j, id) = matte_job(matte_tag(0), &tx, &activity, std::env::temp_dir().join(format!("lc-matte-none-{}", std::process::id())));
+        activity.cancel(id).unwrap();
+        jtx.send(j).unwrap();
+        drop(jtx);
+        let shared = Shared::default();
+        shared.matte.store(1, Ordering::SeqCst);
+        run(&jrx, &shared, Duration::from_secs(60), Placement::Cpu);
+        assert_eq!(rx.recv().unwrap().result.unwrap_err(), MATTE_CANCELLED);
+        assert!(activity.list().is_empty());
+    }
+
+    #[test]
+    fn a_newer_matting_request_supersedes_a_queued_one_and_frees_its_row() {
+        let activity = crate::activity::Activity::default();
+        let (tx, rx) = mpsc::channel();
+        let (jtx, jrx) = mpsc::channel();
+        let dir = std::env::temp_dir().join(format!("lc-matte-none-{}", std::process::id()));
+        for comp in [0, 0, 1] {
+            let (j, _) = matte_job(matte_tag(comp), &tx, &activity, dir.clone());
+            jtx.send(j).unwrap();
+        }
+        drop(jtx);
+        let shared = Shared::default();
+        shared.matte.store(3, Ordering::SeqCst);
+        run(&jrx, &shared, Duration::from_secs(60), Placement::Cpu);
+        let out: Vec<Outcome> = rx.try_iter().collect();
+        assert_eq!(out.len(), 3);
+        assert!(out[0].superseded && !out[1].superseded && !out[2].superseded, "same component only");
+        assert_eq!(shared.matte.load(Ordering::SeqCst), 0);
+        assert!(activity.list().is_empty());
     }
 }

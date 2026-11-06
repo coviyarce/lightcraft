@@ -499,7 +499,7 @@ pub fn detail_region_why(seg: &SegMask, aspect: f64) -> Result<[f64; 4], &'stati
 
 /// `shape` without its detail patches (what a detail pass was computed from)
 #[cfg_attr(not(feature = "sam"), allow(dead_code))]
-fn strip_detail(mut shape: MaskShape) -> MaskShape {
+pub(crate) fn strip_detail(mut shape: MaskShape) -> MaskShape {
     // (nor its edge setting, its matte or the matting switch: changing them meanwhile keeps the pass)
     if let MaskShape::Object { detail, edge, matte, matting, .. } | MaskShape::Prompt { detail, edge, matte, matting, .. } = &mut shape {
         detail.clear();
@@ -513,7 +513,7 @@ fn strip_detail(mut shape: MaskShape) -> MaskShape {
 /// `shape` without its matte tiles (what a matting pass was computed from). The edge setting and
 /// the matting switch don't count: changing them meanwhile keeps the pass.
 #[cfg_attr(not(feature = "sam"), allow(dead_code))]
-fn strip_matte(mut shape: MaskShape) -> MaskShape {
+pub(crate) fn strip_matte(mut shape: MaskShape) -> MaskShape {
     if let MaskShape::Object { edge, matte, matting, .. } | MaskShape::Prompt { edge, matte, matting, .. } = &mut shape {
         matte.clear();
         *edge = 0.0;
